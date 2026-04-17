@@ -1,0 +1,48 @@
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# ── Project Specific ──────────────────────────────────────────────
+# Không lưu Database thực tế (chứa dữ liệu chạy máy)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+
+# Không lưu Logs
+logs/*.log
+
+# Không lưu ảnh tạm hoặc video ghi hình lúc debug
+*.jpg
+*.jpeg
+*.png
+*.mp4
+
+# ── Hardware & IDE ────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# ── AI Models ─────────────────────────────────────────────────────
+# Giữ lại thư mục models nhưng không lưu các file .pt nặng (nếu bạn có)
+# Chỉ nên lưu bản NCNN đã export hoặc file .tflite cuối cùng
+models/*.pt
+models/*.onnx
+
+# ── Arduino ───────────────────────────────────────────────────────
+# Thư mục tạm khi biên dịch Arduino
+arduino_firmware/build/
+arduino_firmware/libraries/
+
+# ── Environment Variables ─────────────────────────────────────────
+# Lưu thông tin bí mật (nếu có)
+.env

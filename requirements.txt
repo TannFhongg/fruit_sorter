@@ -1,0 +1,23 @@
+# ── Core ──────────────────────────────────────────────────────────
+pyyaml>=6.0
+
+# ── Vision ────────────────────────────────────────────────────────
+# ── Vision ────────────────────────────────────────────────────────
+opencv-python-headless>=4.9
+ncnn         # Dùng để load và chạy NCNN cực kỳ dễ
+numpy>=1.24
+
+# ── Serial (RPi ↔ Arduino) ────────────────────────────────────────
+pyserial>=3.5
+
+# ── Web (Flask + SocketIO — thay cho FastAPI/uvicorn) ─────────────
+flask>=3.0
+flask-socketio>=5.3
+simple-websocket>=1.0         # transport backend cho flask-socketio
+
+# ── Database ──────────────────────────────────────────────────────
+# sqlite3 là built-in Python — không cần cài thêm
+
+# ── Dev / Test ────────────────────────────────────────────────────
+pytest>=8.0
+pytest-asyncio>=0.23

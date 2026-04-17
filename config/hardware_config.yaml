@@ -1,0 +1,157 @@
+# =============================================================================
+#  config/hardware_config.yaml
+#  Cấu hình phần cứng & hệ thống — FruitSorter
+#  Chỉnh sửa file này, KHÔNG hardcode trong code
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# SYSTEM
+# ---------------------------------------------------------------------------
+system:
+  name: "FruitSorter v2.0"
+  mode: "production"        # "production" | "debug" | "simulation"
+  log_level: "INFO"
+  log_file: "logs/sorter.log"
+  timezone: "Asia/Ho_Chi_Minh"
+  queue_maxlen: 20           # Detection queue size (drop oldest khi tràn)
+
+# ---------------------------------------------------------------------------
+# WEB SERVER (Flask + SocketIO)
+# ---------------------------------------------------------------------------
+web:
+  host: "0.0.0.0"
+  port: 5000
+  secret_key: "fruit-sorter-secret-2025"
+  socketio_async_mode: "threading"
+  cors_allowed_origins: "*"
+
+# ---------------------------------------------------------------------------
+# CAMERA (USB Camera qua OpenCV — trên RPi 4)
+# ---------------------------------------------------------------------------
+camera:
+  device_index: 0            # /dev/video0
+  width: 640
+  height: 480
+  fps: 30
+  buffer_size: 2             # OpenCV buffer nhỏ → giảm latency
+
+# ---------------------------------------------------------------------------
+# ARDUINO SLAVE — UART Serial
+# ---------------------------------------------------------------------------
+arduino:
+  serial:
+    port: "/dev/ttyUSB0"     # Kiểm tra: ls /dev/ttyUSB* hoặc /dev/ttyACM*
+    baudrate: 115200
+    timeout_s: 1.0
+    reconnect_delay_s: 3.0
+    reconnect_max: 10
+
+  heartbeat:
+    interval_s: 5
+    max_missed: 3            # Cảnh báo + dừng băng sau N lần miss
+
+# ---------------------------------------------------------------------------
+# HARDWARE PINS — chân Arduino (KHÔNG phải BCM của RPi)
+# ---------------------------------------------------------------------------
+hardware:
+  ir_sensors:
+    ir1:
+      pin: 2                 # Arduino digital pin 2 (interrupt)
+      label: "station_1"     # Vị trí trước servo 1
+      debounce_ms: 20
+    ir2:
+      pin: 3                 # Arduino digital pin 3 (interrupt)
+      label: "station_2"     # Vị trí trước servo 2
+      debounce_ms: 20
+
+  servos:
+    servo1:
+      pin: 9                 # Arduino PWM pin 9
+      label: "sorter_green"
+      angle_neutral: 90
+      angle_left: 45         # GREEN → trái
+      angle_right: 135       # Reject → phải
+      hold_ms: 500
+    servo2:
+      pin: 10                # Arduino PWM pin 10
+      label: "sorter_red_yellow"
+      angle_neutral: 90
+      angle_left: 50         # RED → trái
+      angle_right: 130       # YELLOW → phải
+      hold_ms: 500
+
+# ---------------------------------------------------------------------------
+# CONVEYOR — băng chuyền
+# ---------------------------------------------------------------------------
+conveyor:
+  speed_m_s: 0.30            # Đo thực tế bằng tools/calibrate_belt.py
+  camera_to_ir1_m: 0.25      # Khoảng cách camera → IR1
+  camera_to_ir2_m: 0.45      # Khoảng cách camera → IR2
+
+  timing:
+    tolerance_pct: 20        # ±20% cửa sổ thời gian hợp lệ
+    # Tự tính từ speed + distance. Ghi đè nếu cần:
+    # ir1_window_ms: [700, 1000]
+    # ir2_window_ms: [1200, 1800]
+
+# ---------------------------------------------------------------------------
+# AI MODEL — YOLO Fruit Detection
+# ---------------------------------------------------------------------------
+model:
+  path: "models/yolov8n_fruit_int8.tflite"
+  type: "tflite"             # "tflite" | "onnx"
+  input_size: [640, 640]     # [W, H]
+  num_threads: 4             # RPi4 = 4 cores, dùng 3 cho inference
+
+  thresholds:
+    confidence: 0.65         # Bỏ detection dưới ngưỡng này
+    iou_nms: 0.45            # NMS overlap threshold
+    min_bbox_area: 1500      # px² — lọc nhiễu bbox quá nhỏ
+
+  # Nhãn lớp — thứ tự PHẢI khớp với model đã train
+  labels:
+    0: "GREEN"
+    1: "RED"
+    2: "YELLOW"
+
+  # Màu vẽ bbox debug (BGR)
+  label_colors:
+    GREEN:  [0, 200, 50]
+    RED:    [0, 50, 220]
+    YELLOW: [0, 210, 255]
+
+  # Mapping nhãn → servo action
+  routing:
+    GREEN:   { servo: 1, direction: "left"  }
+    RED:     { servo: 2, direction: "left"  }
+    YELLOW:  { servo: 2, direction: "right" }
+    UNKNOWN: { servo: null, direction: "reject" }
+
+# ---------------------------------------------------------------------------
+# DATABASE — SQLite
+# ---------------------------------------------------------------------------
+database:
+  path: "data/sorter.db"
+  wal_mode: true
+  cache_kb: 4096
+  write_queue:
+    flush_interval_s: 5
+    flush_batch_size: 20
+  retention:
+    events_days: 30
+    stats_days: 365
+
+# ---------------------------------------------------------------------------
+# DASHBOARD — SocketIO push interval
+# ---------------------------------------------------------------------------
+dashboard:
+  push_interval_s: 1.0
+  max_log_entries: 200       # Số dòng tối đa hiển thị trong live log
+
+# ---------------------------------------------------------------------------
+# ALERTS
+# ---------------------------------------------------------------------------
+alerts:
+  low_confidence_streak: 5
+  queue_overflow_warn: 15
+  serial_reconnect_max: 5
