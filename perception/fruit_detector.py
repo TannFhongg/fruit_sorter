@@ -1,12 +1,3 @@
-"""
-perception/fruit_detector.py  ·  Thread 1 — Perception
-========================================================
-Camera Manager → Pre-process (letterbox) → TFLite YOLOv8 inference
-→ NMS → build DetectionResult → push vào Shared Queue
-
-Tương đương: master/vision/inference_thread.py (cũ)
-"""
-
 from __future__ import annotations
 
 import logging
@@ -36,13 +27,15 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> list[int]:
     order = scores.argsort()[::-1]
     keep: list[int] = []
     while order.size > 0:
-        i = order[0]; keep.append(int(i))
-        if order.size == 1: break
+        i = order[0]
+        keep.append(int(i))
+        if order.size == 1:
+            break
         inter = (
             np.maximum(0, np.minimum(x2[i], x2[order[1:]]) - np.maximum(x1[i], x1[order[1:]])) *
             np.maximum(0, np.minimum(y2[i], y2[order[1:]]) - np.maximum(y1[i], y1[order[1:]]))
         )
-        iou   = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
+        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
         order = order[1:][iou <= iou_thr]
     return keep
 
@@ -50,7 +43,7 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> list[int]:
 class FruitDetector(threading.Thread):
     """
     Thread 1 — Perception.
-    Vòng lặp: read frame → letterbox → TFLite invoke → decode → queue.put()
+    Vòng lặp: read frame → letterbox → NCNN inference → decode → queue.put()
     """
 
     def __init__(
@@ -62,30 +55,28 @@ class FruitDetector(threading.Thread):
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self.cfg        = cfg
-        self.queue      = detection_queue
-        self.lock       = queue_lock
+        self.cfg = cfg
+        self.queue = detection_queue
+        self.lock = queue_lock
         self.stop_event = stop_event
-        self._frame_id  = 0
-        self._interp    = None          # TFLite interpreter — init trong run()
-        self._input_details  = None
-        self._output_details = None
+        self._frame_id = 0
+        self._interp = None  # NCNN Net
         self._input_wh: tuple[int, int] = (640, 640)
-        self._transposed = False        # YOLOv8 output format flag
 
         # Config shortcuts
         m = cfg["model"]
-        self._conf_thr  = m["thresholds"]["confidence"]
-        self._iou_thr   = m["thresholds"]["iou_nms"]
-        self._min_area  = m["thresholds"]["min_bbox_area"]
-        self._labels    = m["labels"]       # {0: "GREEN", ...}
-        self._routing   = m["routing"]
-        cam             = cfg["camera"]
-        self._cam_idx   = cam["device_index"]
-        self._cam_w     = cam["width"]
-        self._cam_h     = cam["height"]
-        self._cam_fps   = cam["fps"]
-        self._cam_buf   = cam["buffer_size"]
+        self._conf_thr = m["thresholds"]["confidence"]
+        self._iou_thr = m["thresholds"]["iou_nms"]
+        self._min_area = m["thresholds"]["min_bbox_area"]
+        self._labels = m["labels"]
+        self._routing = m["routing"]
+
+        cam = cfg["camera"]
+        self._cam_idx = cam["device_index"]
+        self._cam_w = cam["width"]
+        self._cam_h = cam["height"]
+        self._cam_fps = cam["fps"]
+        self._cam_buf = cam["buffer_size"]
 
     # ── Thread body ───────────────────────────────────────────────────────
 
@@ -127,26 +118,25 @@ class FruitDetector(threading.Thread):
     # ── Model loading ─────────────────────────────────────────────────────
 
     def _load_model(self) -> None:
-        path = self.cfg["model"]["path"]
-        n_threads = self.cfg["model"].get("num_threads", 4)
-        log.info(f"Loading model: {path}")
+        import ncnn
+        path_bin = self.cfg["model"]["path_bin"]
+        path_param = self.cfg["model"]["path_param"]
+        use_gpu = self.cfg["model"].get("use_gpu", False)
+
+        log.info(f"Loading NCNN model: {path_param}")
         try:
-            try:
-                import tflite_runtime.interpreter as tflite
-            except ImportError:
-                import tensorflow.lite as tflite     # type: ignore
-            self._interp = tflite.Interpreter(model_path=path, num_threads=n_threads)
-            self._interp.allocate_tensors()
-            self._input_details  = self._interp.get_input_details()
-            self._output_details = self._interp.get_output_details()
-            shp = self._input_details[0]["shape"]           # [1, H, W, 3]
-            self._input_wh   = (int(shp[2]), int(shp[1]))  # (W, H)
-            out_shp = self._output_details[0]["shape"]      # [1, C+4, A] or [1, A, C+4]
-            self._transposed = out_shp[1] < out_shp[2]
-            log.info(
-                f"Model ready | input={self._input_wh} | "
-                f"output={list(out_shp)} | transposed={self._transposed}"
-            )
+            self._interp = ncnn.Net()
+            self._interp.opt.use_vulkan_compute = use_gpu
+            self._interp.load_param(path_param)
+            self._interp.load_model(path_bin)
+
+            # Giả định input size từ config hoặc mặc định
+            self._input_wh = (640, 640)
+            # NCNN thường không tự transpose output như TFLite,
+            # biến này bạn có thể tùy chỉnh dựa trên bản export của mình.
+            self._transposed = True
+
+            log.info("NCNN Model ready")
         except Exception as e:
             log.error(f"Model load failed: {e} → simulation mode")
             self._interp = None
@@ -155,10 +145,10 @@ class FruitDetector(threading.Thread):
 
     def _open_camera(self) -> cv2.VideoCapture:
         cap = cv2.VideoCapture(self._cam_idx, cv2.CAP_V4L2)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._cam_w)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._cam_w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._cam_h)
-        cap.set(cv2.CAP_PROP_FPS,          self._cam_fps)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE,   self._cam_buf)
+        cap.set(cv2.CAP_PROP_FPS, self._cam_fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, self._cam_buf)
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         if not cap.isOpened():
             raise RuntimeError(f"Cannot open camera {self._cam_idx}")
@@ -170,12 +160,34 @@ class FruitDetector(threading.Thread):
     def _run_inference(self, frame: np.ndarray) -> list[dict]:
         if self._interp is None:
             return self._simulate()
+
+        import ncnn
         W, H = self._input_wh
-        blob, (px, py, sc) = _letterbox(frame, W, H)
-        tensor = blob.astype(np.float32)[None] / 255.0
-        self._interp.set_tensor(self._input_details[0]["index"], tensor)
-        self._interp.invoke()
-        raw = self._interp.get_tensor(self._output_details[0]["index"])
+        blob_img, (px, py, sc) = _letterbox(frame, W, H)
+
+        # Tạo ncnn.Mat từ numpy (BGR → RGB)
+        blob_rgb = cv2.cvtColor(blob_img, cv2.COLOR_BGR2RGB)
+        mat_in = ncnn.Mat.from_pixels(
+            blob_rgb, ncnn.Mat.PixelType.PIXEL_RGB, W, H
+        )
+
+        # Normalize [0,255] → [0,1]
+        mean_vals = [0.0, 0.0, 0.0]
+        norm_vals = [1 / 255.0, 1 / 255.0, 1 / 255.0]
+        mat_in.substract_mean_normalize(mean_vals, norm_vals)
+
+        # Forward pass
+        ex = self._interp.create_extractor()
+        ex.input("in0", mat_in)
+        ret, mat_out = ex.extract("out0")
+
+        if ret != 0:
+            log.warning("NCNN extract failed")
+            return []
+
+        raw = np.array(mat_out)
+        if raw.ndim == 2:
+            raw = raw[np.newaxis, :]
         return self._decode(raw, px, py, sc, frame.shape)
 
     def _decode(
@@ -186,17 +198,21 @@ class FruitDetector(threading.Thread):
     ) -> list[dict]:
         out = raw[0]
         if self._transposed:
-            out = out.T                                 # → [A, 4+C]
+            out = out.T  # → [A, 4+C]
+
         n_cls = len(self._labels)
         bxywh = out[:, :4]
         cls_s = out[:, 4:4 + n_cls]
-        cids  = np.argmax(cls_s, axis=1)
+        cids = np.argmax(cls_s, axis=1)
         confs = cls_s[np.arange(len(cls_s)), cids]
 
         mask = confs >= self._conf_thr
         if not np.any(mask):
             return []
-        bxywh = bxywh[mask]; confs = confs[mask]; cids = cids[mask]
+
+        bxywh = bxywh[mask]
+        confs = confs[mask]
+        cids = cids[mask]
 
         keep = _nms(bxywh, confs, self._iou_thr)
         oh, ow = orig_shape[:2]
@@ -205,15 +221,18 @@ class FruitDetector(threading.Thread):
             cx, cy, bw, bh = bxywh[i]
             x0 = int((cx - px) / sc - bw / (2 * sc))
             y0 = int((cy - py) / sc - bh / (2 * sc))
-            w  = int(bw / sc); h = int(bh / sc)
+            w = int(bw / sc)
+            h = int(bh / sc)
             x0, y0 = max(0, x0), max(0, y0)
-            w = min(w, ow - x0); h = min(h, oh - y0)
+            w = min(w, ow - x0)
+            h = min(h, oh - y0)
+
             if w * h < self._min_area:
                 continue
             results.append({
-                "label":      self._labels.get(int(cids[i]), "UNKNOWN"),
+                "label": self._labels.get(int(cids[i]), "UNKNOWN"),
                 "confidence": float(confs[i]),
-                "bbox":       (x0, y0, w, h),
+                "bbox": (x0, y0, w, h),
             })
         return results
 
@@ -224,7 +243,7 @@ class FruitDetector(threading.Thread):
             color = FruitColor(det["label"])
         except ValueError:
             color = FruitColor.UNKNOWN
-        route  = self._routing.get(det["label"], self._routing.get("UNKNOWN", {}))
+        route = self._routing.get(det["label"], self._routing.get("UNKNOWN", {}))
         action = _resolve_action(route)
         return DetectionResult(
             fruit_color=color,
@@ -239,8 +258,11 @@ class FruitDetector(threading.Thread):
         if random.random() > 0.12:
             return []
         label = random.choice(["GREEN", "RED", "YELLOW"])
-        return [{"label": label, "confidence": round(random.uniform(0.70, 0.97), 2),
-                 "bbox": (160, 110, 120, 120)}]
+        return [{
+            "label": label,
+            "confidence": round(random.uniform(0.70, 0.97), 2),
+            "bbox": (160, 110, 120, 120)
+        }]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -249,17 +271,17 @@ def _letterbox(
     img: np.ndarray, tw: int, th: int
 ) -> tuple[np.ndarray, tuple[float, float, float]]:
     ih, iw = img.shape[:2]
-    sc  = min(tw / iw, th / ih)
+    sc = min(tw / iw, th / ih)
     nw, nh = int(iw * sc), int(ih * sc)
     resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    canvas  = np.full((th, tw, 3), 114, dtype=np.uint8)
-    px, py  = (tw - nw) // 2, (th - nh) // 2
+    canvas = np.full((th, tw, 3), 114, dtype=np.uint8)
+    px, py = (tw - nw) // 2, (th - nh) // 2
     canvas[py:py + nh, px:px + nw] = resized
     return canvas, (float(px), float(py), sc)
 
 
 def _resolve_action(route: dict) -> SortAction:
-    servo     = route.get("servo")
+    servo = route.get("servo")
     direction = route.get("direction", "reject")
     if servo is None or direction == "reject":
         return SortAction.REJECT

@@ -98,10 +98,10 @@ conveyor:
 # AI MODEL — YOLO Fruit Detection
 # ---------------------------------------------------------------------------
 model:
-  path: "models/yolov8n_fruit_int8.tflite"
-  type: "tflite"             # "tflite" | "onnx"
-  input_size: [640, 640]     # [W, H]
-  num_threads: 4             # RPi4 = 4 cores, dùng 3 cho inference
+  path: "models/best_ncnn_model"        # ← thư mục chứa .param + .bin
+  type: "ncnn"                           # ← đổi từ "tflite" → "ncnn"
+  input_size: [640, 640]
+  num_threads: 4    
 
   thresholds:
     confidence: 0.65         # Bỏ detection dưới ngưỡng này
