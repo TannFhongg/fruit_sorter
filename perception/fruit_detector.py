@@ -62,6 +62,7 @@ class FruitDetector(threading.Thread):
         self._frame_id = 0
         self._interp = None  # NCNN Net
         self._input_wh: tuple[int, int] = (640, 640)
+        self._transposed = True  # YOLOv8 NCNN export mặc định output dạng [C+4, A] cần transpose
 
         # Config shortcuts
         m = cfg["model"]
@@ -119,24 +120,22 @@ class FruitDetector(threading.Thread):
 
     def _load_model(self) -> None:
         import ncnn
-        path_bin = self.cfg["model"]["path_bin"]
-        path_param = self.cfg["model"]["path_param"]
-        use_gpu = self.cfg["model"].get("use_gpu", False)
+        # ĐỌC ĐÚNG KEY TỪ CONFIG
+        model_dir = self.cfg["model"]["path"]  # "models/best_ncnn_model"
+        n_threads = self.cfg["model"].get("num_threads", 4)
+        param_path = f"{model_dir}/model.ncnn.param"  # tự ghép đường dẫn
+        bin_path = f"{model_dir}/model.ncnn.bin"
 
-        log.info(f"Loading NCNN model: {path_param}")
+        log.info(f"Loading NCNN model from: {model_dir}")
         try:
             self._interp = ncnn.Net()
-            self._interp.opt.use_vulkan_compute = use_gpu
-            self._interp.load_param(path_param)
-            self._interp.load_model(path_bin)
-
-            # Giả định input size từ config hoặc mặc định
-            self._input_wh = (640, 640)
-            # NCNN thường không tự transpose output như TFLite,
-            # biến này bạn có thể tùy chỉnh dựa trên bản export của mình.
-            self._transposed = True
-
-            log.info("NCNN Model ready")
+            self._interp.opt.use_vulkan_compute = False
+            self._interp.opt.num_threads = n_threads
+            self._interp.load_param(param_path)
+            self._interp.load_model(bin_path)
+            w, h = self.cfg["model"]["input_size"]
+            self._input_wh = (int(w), int(h))
+            log.info(f"NCNN model ready | input={self._input_wh} | threads={n_threads}")
         except Exception as e:
             log.error(f"Model load failed: {e} → simulation mode")
             self._interp = None
