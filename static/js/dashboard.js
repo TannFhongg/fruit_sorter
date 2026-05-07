@@ -1,21 +1,11 @@
-/* static/js/dashboard.js — FruitSorter Dashboard Logic
- * Kết nối Flask-SocketIO, nhận stats_update event, cập nhật UI.
- */
-
+/* static/js/dashboard.js — FruitSorter Dashboard */
 'use strict';
 
-// ── Constants ────────────────────────────────────────────────────────────
-const BAR_BINS    = 20;         // 20 cột × 3s = 60s window
-const BIN_TICK_MS = 3000;
-const CIRC        = 2 * Math.PI * 46;  // SVG r=46
+const CIRC = 2 * Math.PI * 46;
 
-// ── State ─────────────────────────────────────────────────────────────────
-let prev           = { GREEN: 0, RED: 0, YELLOW: 0, rejects: 0 };
-let throughput     = new Array(BAR_BINS).fill(0);
-let currentDelta   = 0;
-let eventCount     = 0;
+let prev       = { GREEN: 0, RED: 0, YELLOW: 0, rejects: 0 };
+let eventCount = 0;
 
-// ── DOM refs ──────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
 // ── Clock ─────────────────────────────────────────────────────────────────
@@ -27,47 +17,44 @@ setInterval(() => {
 const socket = io({ transports: ['websocket', 'polling'] });
 
 socket.on('connect', () => {
-  $('ws-dot').className   = 'status-dot online';
+  $('ws-dot').className    = 'status-dot online';
   $('ws-label').textContent = 'Live';
   loadBootstrapData();
 });
 
 socket.on('disconnect', () => {
-  $('ws-dot').className   = 'status-dot offline';
+  $('ws-dot').className    = 'status-dot offline';
   $('ws-label').textContent = 'Offline';
 });
 
-socket.on('stats_update', data => {
-  applyStats(data);
+socket.on('stats_update', data => applyStats(data));
+socket.on('sort_event',   e    => addLogEntry(e));
+
+// ── Detection event từ server (push ngay khi detect) ──────────────────────
+socket.on('detection', data => {
+  const { label, confidence } = data;
+  showDetectionOverlay(label, confidence);
 });
 
-// Load today's persisted stats from DB on page open
+// ── Bootstrap data khi mở trang ───────────────────────────────────────────
 async function loadBootstrapData() {
   try {
     const r = await fetch('/api/stats/today');
     if (!r.ok) return;
     const d = await r.json();
-    applyStats({
-      GREEN:   d.green   || 0,
-      RED:     d.red     || 0,
-      YELLOW:  d.yellow  || 0,
-      rejects: d.rejects || 0,
-    });
-  } catch (e) { /* ignore */ }
+    applyStats({ GREEN: d.green||0, RED: d.red||0, YELLOW: d.yellow||0, rejects: d.rejects||0 });
+  } catch {}
 
   try {
     const r = await fetch('/api/events/recent?limit=30');
     if (!r.ok) return;
     const events = await r.json();
     events.reverse().forEach(e => addLogEntry({
-      fruit_color: e.fruit_color,
-      confidence:  e.confidence,
-      action:      e.action,
-      station:     e.station,
-      is_reject:   e.is_reject,
-      ts_ms:       e.sorted_at,
+      fruit_color: e.fruit_color, confidence: e.confidence,
+      action: e.action, station: e.station,
+      is_reject: e.is_reject, ts_ms: e.sorted_at,
     }));
-  } catch (e) { /* ignore */ }
+  } catch {}
 }
 
 // ── Stats update ──────────────────────────────────────────────────────────
@@ -78,29 +65,21 @@ function applyStats(data) {
   const rej = data.rejects || 0;
   const tot = g + r + y;
 
-  // Stat cards
-  setCard('cnt-green',  g,   'sub-green',  prev.GREEN,  'GREEN');
-  setCard('cnt-red',    r,   'sub-red',    prev.RED,    'RED');
-  setCard('cnt-yellow', y,   'sub-yellow', prev.YELLOW, 'YELLOW');
+  setCard('cnt-green',  g, 'sub-green',  prev.GREEN);
+  setCard('cnt-red',    r, 'sub-red',    prev.RED);
+  setCard('cnt-yellow', y, 'sub-yellow', prev.YELLOW);
 
-  $('cnt-total').textContent = tot;
+  $('cnt-total').textContent  = tot;
   $('sub-reject').textContent = tot > 0
     ? `Reject ${Math.round(rej / (tot + rej) * 100)}%`
     : 'Reject 0%';
 
-  // Sidebar
   $('sb-green').textContent   = g;
   $('sb-red').textContent     = r;
   $('sb-yellow').textContent  = y;
   $('sb-rejects').textContent = rej;
 
-  // Donut
   updateDonut(g, r, y, tot);
-
-  // Throughput delta
-  const newTot = tot;
-  const oldTot = (prev.GREEN || 0) + (prev.RED || 0) + (prev.YELLOW || 0);
-  currentDelta += Math.max(0, newTot - oldTot);
 
   $('last-update').textContent = 'Updated ' +
     new Date().toLocaleTimeString('vi-VN', { hour12: false });
@@ -108,7 +87,7 @@ function applyStats(data) {
   prev = { GREEN: g, RED: r, YELLOW: y, rejects: rej };
 }
 
-function setCard(valId, val, subId, prevVal, colorKey) {
+function setCard(valId, val, subId, prevVal) {
   const el = $(valId);
   if (parseInt(el.textContent) !== val) {
     el.textContent = val;
@@ -118,80 +97,114 @@ function setCard(valId, val, subId, prevVal, colorKey) {
   }
   const diff = val - (prevVal || 0);
   $(subId).textContent = diff > 0 ? `+${diff} this session` : '—';
-  $(subId).className = 'stat-card__sub' + (diff > 0 ? ' up' : '');
+  $(subId).className   = 'stat-card__sub' + (diff > 0 ? ' up' : '');
 }
 
 // ── Donut ─────────────────────────────────────────────────────────────────
 function updateDonut(g, r, y, tot) {
   const total = tot || 1;
-  const gArc = (g / total) * CIRC;
-  const rArc = (r / total) * CIRC;
-  const yArc = (y / total) * CIRC;
-  const gPct = Math.round(g / total * 100);
-  const rPct = Math.round(r / total * 100);
-  const yPct = 100 - gPct - rPct;
+  const gArc  = (g / total) * CIRC;
+  const rArc  = (r / total) * CIRC;
+  const yArc  = (y / total) * CIRC;
 
   setArc('d-green',  gArc, 0);
   setArc('d-red',    rArc, gArc);
   setArc('d-yellow', yArc, gArc + rArc);
 
-  $('pct-green').textContent  = gPct + '%';
-  $('pct-red').textContent    = rPct + '%';
-  $('pct-yellow').textContent = yPct + '%';
+  $('pct-green').textContent  = Math.round(g / total * 100) + '%';
+  $('pct-red').textContent    = Math.round(r / total * 100) + '%';
+  $('pct-yellow').textContent = (100 - Math.round(g / total * 100) - Math.round(r / total * 100)) + '%';
   $('donut-total').textContent = tot;
 }
 
 function setArc(id, arc, offset) {
   const el = $(id);
-  el.setAttribute('stroke-dasharray', `${arc.toFixed(2)} ${(CIRC - arc).toFixed(2)}`);
-  // Rotate via dashoffset trick: offset prior arcs
-  // SVG starts at top (rotate(-90)), each arc starts after previous
-  const r = 46;
-  // We use stroke-dashoffset to shift the start of this arc
+  el.setAttribute('stroke-dasharray',  `${arc.toFixed(2)} ${(CIRC - arc).toFixed(2)}`);
   el.setAttribute('stroke-dashoffset', (-offset).toFixed(2));
 }
 
-// ── Throughput bars ───────────────────────────────────────────────────────
-function rebuildBars() {
-  const bc    = $('bar-chart');
-  const bx    = $('bar-xaxis');
-  const maxV  = Math.max(...throughput, 1);
-  bc.innerHTML = '';
-  bx.innerHTML = '';
+// ── Camera stream ──────────────────────────────────────────────────────────
+let _camOk        = false;
+let _lastFrameTs  = 0;
+let _frameCount   = 0;
+let _fpsCounter   = 0;
+let _fpsLastTs    = performance.now();
+let _camCheckTimer = null;
 
-  throughput.forEach((v, i) => {
-    const h   = Math.max(3, Math.round((v / maxV) * 68));
-    const age = (BAR_BINS - 1 - i) * (BIN_TICK_MS / 1000);
-    const op  = 0.25 + (i / (BAR_BINS - 1)) * 0.75;
+function handleCamLoad() {
+  _camOk = true;
+  $('cam-offline').classList.remove('visible');
+  $('cam-live').classList.add('active');
 
-    const bar = document.createElement('div');
-    bar.className = 'bar-chart__bar';
-    bar.style.height     = h + 'px';
-    bar.style.background = `rgba(99,102,241,${op.toFixed(2)})`;
-    bc.appendChild(bar);
+  // FPS 계산: 매 프레임마다 카운터 증가
+  _frameCount++;
+  _fpsCounter++;
+  const now = performance.now();
+  if (now - _fpsLastTs >= 1000) {
+    const fps = Math.round(_fpsCounter * 1000 / (now - _fpsLastTs));
+    $('cam-fps-badge').textContent = fps + ' fps';
+    _fpsCounter = 0;
+    _fpsLastTs  = now;
+  }
+  _lastFrameTs = now;
 
-    const lbl = document.createElement('div');
-    lbl.className = 'bar-chart-xaxis__lbl';
-    lbl.textContent = i === BAR_BINS - 1 ? 'now' : (age > 0 ? `-${age}s` : '');
-    bx.appendChild(lbl);
-  });
+  // Reset error check timer
+  clearTimeout(_camCheckTimer);
+  _camCheckTimer = setTimeout(checkCamAlive, 3000);
 }
 
-rebuildBars();
+function handleCamError() {
+  _camOk = false;
+  $('cam-offline').classList.add('visible');
+  $('cam-live').classList.remove('active');
+  $('cam-fps-badge').textContent = '-- fps';
 
-setInterval(() => {
-  throughput.shift();
-  throughput.push(currentDelta);
-  currentDelta = 0;
-  rebuildBars();
-}, BIN_TICK_MS);
+  // Thử reload sau 2s
+  setTimeout(() => {
+    const img = $('cam-stream');
+    img.src = '/video_feed?' + Date.now();
+  }, 2000);
+}
+
+function checkCamAlive() {
+  const elapsed = performance.now() - _lastFrameTs;
+  if (elapsed > 3000) {
+    handleCamError();
+  }
+}
+
+// ── Detection overlay ─────────────────────────────────────────────────────
+let _detHideTimer = null;
+
+function showDetectionOverlay(label, confidence) {
+  const overlay  = $('cam-det-overlay');
+  const labelEl  = $('cam-det-label');
+  const confEl   = $('cam-det-conf');
+  const badge    = $('cam-detect-badge');
+
+  // Update overlay
+  labelEl.textContent  = label;
+  labelEl.className    = 'cam-det-label ' + label;
+  confEl.textContent   = (confidence * 100).toFixed(0) + '%';
+  overlay.style.display = 'flex';
+
+  // Update header badge
+  badge.textContent = label + ' ' + (confidence * 100).toFixed(0) + '%';
+  badge.className   = 'cam-badge cam-badge--detect ' + label.toLowerCase();
+
+  // Auto-hide sau 2s nếu không có detection mới
+  clearTimeout(_detHideTimer);
+  _detHideTimer = setTimeout(() => {
+    overlay.style.display = 'none';
+    badge.textContent     = 'No detection';
+    badge.className       = 'cam-badge cam-badge--detect';
+  }, 2000);
+}
 
 // ── Event log ─────────────────────────────────────────────────────────────
-socket.on('sort_event', e => addLogEntry(e));
-
 function addLogEntry(e) {
-  const log = $('event-log');
-  if (log.children.length >= 200) log.lastElementChild?.remove();
+  const logEl = $('event-log');
+  if (logEl.children.length >= 200) logEl.lastElementChild?.remove();
 
   const ts  = e.ts_ms
     ? new Date(e.ts_ms).toLocaleTimeString('vi-VN', { hour12: false })
@@ -206,8 +219,13 @@ function addLogEntry(e) {
     <span class="log-entry__action">${e.action}</span>
     <span class="log-entry__station">IR${e.station || 1}</span>
   `;
-  log.prepend(row);
+  logEl.prepend(row);
 
   eventCount++;
   $('event-count').textContent = eventCount + ' events';
+
+  // Khi có event mới, show detection overlay nếu không phải reject
+  if (!e.is_reject) {
+    showDetectionOverlay(e.fruit_color, e.confidence);
+  }
 }
