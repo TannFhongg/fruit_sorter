@@ -108,18 +108,51 @@
       </div>
     </section>
 
-    <!-- Charts -->
+    <!-- Camera stream + Donut (thay thế throughput chart + giữ donut) -->
     <section class="charts-row">
 
-      <!-- Throughput bar chart -->
-      <div class="chart-card">
+      <!-- Camera stream panel -->
+      <div class="chart-card camera-card">
         <div class="sec-header">
-          <h2>Throughput — 60s</h2>
+          <h2>Camera stream</h2>
           <div class="sec-header__line"></div>
+          <div class="cam-badges">
+            <span class="cam-badge" id="cam-fps-badge">-- fps</span>
+            <span class="cam-badge cam-badge--detect" id="cam-detect-badge">No detection</span>
+          </div>
         </div>
-        <div class="bar-chart-wrap">
-          <div class="bar-chart" id="bar-chart"></div>
-          <div class="bar-chart-xaxis" id="bar-xaxis"></div>
+
+        <!-- Video feed container -->
+        <div class="cam-wrap">
+          <img id="cam-stream"
+               src="/video_feed"
+               alt="Camera stream"
+               onerror="handleCamError()"
+               onload="handleCamLoad()"/>
+
+          <!-- Overlay khi mất kết nối camera -->
+          <div class="cam-offline" id="cam-offline">
+            <div class="cam-offline__icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M15 10l4.553-2.069A1 1 0 0121 8.87v6.26a1 1 0 01-1.447.9L15 14M3 8a2 2 0 00-2 2v4a2 2 0 002 2h9a2 2 0 002-2V10a2 2 0 00-2-2H3z"/>
+                <line x1="2" y1="2" x2="22" y2="22"/>
+              </svg>
+            </div>
+            <span class="cam-offline__text">Camera offline</span>
+            <span class="cam-offline__sub">Kiểm tra kết nối USB camera</span>
+          </div>
+
+          <!-- Detection overlay badge (hiện lên khi có detect) -->
+          <div class="cam-det-overlay" id="cam-det-overlay" style="display:none">
+            <span class="cam-det-label" id="cam-det-label">GREEN</span>
+            <span class="cam-det-conf" id="cam-det-conf">---%</span>
+          </div>
+
+          <!-- Live indicator -->
+          <div class="cam-live" id="cam-live">
+            <span class="cam-live__dot"></span>
+            LIVE
+          </div>
         </div>
       </div>
 
@@ -164,44 +197,6 @@
               <span class="legend-name">Yellow</span>
               <span class="legend-pct" id="pct-yellow">0%</span>
             </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- System status -->
-    <section>
-      <div class="sec-header">
-        <h2>System status</h2>
-        <div class="sec-header__line"></div>
-      </div>
-      <div class="status-row">
-        <div class="status-item">
-          <div class="status-item__dot ok" id="si-arduino"></div>
-          <div class="status-item__info">
-            <div class="status-item__name">Arduino Slave</div>
-            <div class="status-item__val" id="si-arduino-val">Waiting…</div>
-          </div>
-        </div>
-        <div class="status-item">
-          <div class="status-item__dot ok" id="si-camera"></div>
-          <div class="status-item__info">
-            <div class="status-item__name">USB Camera</div>
-            <div class="status-item__val" id="si-camera-val">Active</div>
-          </div>
-        </div>
-        <div class="status-item">
-          <div class="status-item__dot ok" id="si-model"></div>
-          <div class="status-item__info">
-            <div class="status-item__name">YOLO Model</div>
-            <div class="status-item__val" id="si-model-val">Loaded</div>
-          </div>
-        </div>
-        <div class="status-item">
-          <div class="status-item__dot ok" id="si-db"></div>
-          <div class="status-item__info">
-            <div class="status-item__name">SQLite DB</div>
-            <div class="status-item__val" id="si-db-val">WAL mode</div>
           </div>
         </div>
       </div>
