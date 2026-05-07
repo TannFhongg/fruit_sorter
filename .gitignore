@@ -37,7 +37,7 @@ logs/*.log
 # Chỉ nên lưu bản NCNN đã export hoặc file .tflite cuối cùng
 models/*.pt
 models/*.onnx
-
+models/
 # ── Arduino ───────────────────────────────────────────────────────
 # Thư mục tạm khi biên dịch Arduino
 arduino_firmware/build/
