@@ -100,8 +100,9 @@ conveyor:
 model:
   path: "models/best_ncnn_model"
   type: "ncnn"
-  input_size: [640, 640]
+  input_size: [320, 320]
   num_threads: 4
+  #frame_skip: 2   
   use_gpu: false              # ← THÊM DÒNG NÀY — RPi4 không có Vulkan   
 
   thresholds:
