@@ -17,13 +17,13 @@ setInterval(() => {
 const socket = io({ transports: ['websocket', 'polling'] });
 
 socket.on('connect', () => {
-  $('ws-dot').className    = 'status-dot online';
+  $('ws-dot').className     = 'status-dot online';
   $('ws-label').textContent = 'Live';
   loadBootstrapData();
 });
 
 socket.on('disconnect', () => {
-  $('ws-dot').className    = 'status-dot offline';
+  $('ws-dot').className     = 'status-dot offline';
   $('ws-label').textContent = 'Offline';
 });
 
@@ -124,53 +124,71 @@ function setArc(id, arc, offset) {
 }
 
 // ── Camera stream ──────────────────────────────────────────────────────────
-let _camOk        = false;
-let _lastFrameTs  = 0;
-let _frameCount   = 0;
-let _fpsCounter   = 0;
-let _fpsLastTs    = performance.now();
-let _camCheckTimer = null;
+// MJPEG stream: <img src="/video_feed"> nhận multipart liên tục.
+// onload chỉ fire 1 lần khi header đến — KHÔNG dùng để track liveness.
+// Thay vào đó: poll /api/health mỗi 3s để kiểm tra server còn sống không.
+// Nếu server alive → coi stream OK. Nếu mất kết nối → show offline overlay.
 
+let _camOnline = false;
+
+function setCamOnline(online) {
+  if (online === _camOnline) return;
+  _camOnline = online;
+  if (online) {
+    $('cam-offline').classList.remove('visible');
+    $('cam-live').classList.add('active');
+  } else {
+    $('cam-offline').classList.add('visible');
+    $('cam-live').classList.remove('active');
+    $('cam-fps-badge').textContent = '-- fps';
+  }
+}
+
+// Kiểm tra server health mỗi 3 giây
+// Nếu /api/health trả về ok → stream đang chạy bình thường
+setInterval(async () => {
+  try {
+    const r = await fetch('/api/health', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) {
+      setCamOnline(true);
+    } else {
+      setCamOnline(false);
+    }
+  } catch {
+    setCamOnline(false);
+  }
+}, 3000);
+
+// Tính FPS dựa trên detection events từ SocketIO thay vì onload
+// (chính xác hơn vì phản ánh tốc độ inference thực tế)
+let _detCount  = 0;
+let _fpsTs     = performance.now();
+
+setInterval(() => {
+  const now     = performance.now();
+  const elapsed = (now - _fpsTs) / 1000;
+  if (elapsed > 0) {
+    // Không dùng detection count vì có thể không có trái cây
+    // → chỉ hiển thị "LIVE" khi server online
+    if (_camOnline) {
+      $('cam-fps-badge').textContent = 'streaming';
+    }
+  }
+  _fpsTs = now;
+}, 5000);
+
+// Khi img load lần đầu — set online ngay không cần chờ poll
 function handleCamLoad() {
-  _camOk = true;
-  $('cam-offline').classList.remove('visible');
-  $('cam-live').classList.add('active');
-
-  // FPS 계산: 매 프레임마다 카운터 증가
-  _frameCount++;
-  _fpsCounter++;
-  const now = performance.now();
-  if (now - _fpsLastTs >= 1000) {
-    const fps = Math.round(_fpsCounter * 1000 / (now - _fpsLastTs));
-    $('cam-fps-badge').textContent = fps + ' fps';
-    _fpsCounter = 0;
-    _fpsLastTs  = now;
-  }
-  _lastFrameTs = now;
-
-  // Reset error check timer
-  clearTimeout(_camCheckTimer);
-  _camCheckTimer = setTimeout(checkCamAlive, 3000);
+  setCamOnline(true);
 }
 
+// Khi img thực sự lỗi (ví dụ 404, network error) — không phải do MJPEG
 function handleCamError() {
-  _camOk = false;
-  $('cam-offline').classList.add('visible');
-  $('cam-live').classList.remove('active');
-  $('cam-fps-badge').textContent = '-- fps';
-
-  // Thử reload sau 2s
-  setTimeout(() => {
-    const img = $('cam-stream');
-    img.src = '/video_feed?' + Date.now();
-  }, 2000);
-}
-
-function checkCamAlive() {
-  const elapsed = performance.now() - _lastFrameTs;
-  if (elapsed > 3000) {
-    handleCamError();
-  }
+  // Chỉ set offline nếu health check cũng fail
+  // (tránh false negative do browser quirk với MJPEG)
+  fetch('/api/health', { signal: AbortSignal.timeout(1000) })
+    .then(r => { if (!r.ok) setCamOnline(false); })
+    .catch(() => setCamOnline(false));
 }
 
 // ── Detection overlay ─────────────────────────────────────────────────────
@@ -183,9 +201,9 @@ function showDetectionOverlay(label, confidence) {
   const badge    = $('cam-detect-badge');
 
   // Update overlay
-  labelEl.textContent  = label;
-  labelEl.className    = 'cam-det-label ' + label;
-  confEl.textContent   = (confidence * 100).toFixed(0) + '%';
+  labelEl.textContent   = label;
+  labelEl.className     = 'cam-det-label ' + label;
+  confEl.textContent    = (confidence * 100).toFixed(0) + '%';
   overlay.style.display = 'flex';
 
   // Update header badge

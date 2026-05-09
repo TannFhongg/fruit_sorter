@@ -2,8 +2,6 @@
 drivers/serial_link.py
 UART Serial link — Raspberry Pi (Master) ↔ Arduino (Slave).
 Tự động reconnect, heartbeat, thread-safe send/receive.
-
-Tương đương: master/utils/serial_manager.py (cũ)
 """
 
 from __future__ import annotations
@@ -22,6 +20,9 @@ class SerialLink(threading.Thread):
     """
     Daemon thread duy trì kết nối Serial với Arduino.
     Expose: send(bytes), read_line() → bytes | None, is_connected
+
+    Khi hết reconnect_max lần thử: thread tự dừng (log CRITICAL)
+    nhưng KHÔNG set stop_event — các thread khác (camera, web) vẫn chạy.
     """
 
     def __init__(self, cfg: dict, stop_event: threading.Event):
@@ -79,11 +80,16 @@ class SerialLink(threading.Thread):
                 self._try_connect()
                 retries += 1
                 if retries > self._max_retry:
-                    log.critical("Max serial reconnect attempts — aborting")
-                    self._stop.set()
+                    log.critical(
+                        "Max serial reconnect attempts — Arduino unavailable. "
+                        "SerialLink thread exiting (camera & web still running)."
+                    )
+                    # ← KHÔNG gọi self._stop.set() ở đây
+                    self._cleanup()
                     return
                 time.sleep(self._delay)
             else:
+                retries = 0   # reset counter khi kết nối thành công
                 time.sleep(self._hb_ivl)
                 self._heartbeat()
         self._cleanup()

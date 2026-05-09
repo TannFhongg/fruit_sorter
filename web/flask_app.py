@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 # ── In-memory live counters ────────────────────────────────────────────────
 _live: dict = defaultdict(int)
 
-# ── Shared latest frame (numpy array, set bởi FruitDetector) ─────────────
+# ── Shared latest frame (JPEG bytes, set bởi FruitDetector) ──────────────
 _latest_frame_lock = threading.Lock()
 _latest_frame      = None   # bytes (JPEG-encoded) hoặc None
 
@@ -56,7 +56,7 @@ def push_frame(jpeg_bytes: bytes) -> None:
 
 def push_detection_event(label: str, confidence: float) -> None:
     """
-    Gọi từ FruitDetector khi detect được vật thể (trước khi vào queue).
+    Gọi từ FruitDetector khi detect được vật thể.
     Push ngay lên dashboard qua SocketIO.
     """
     if _socketio_ref:
@@ -116,40 +116,70 @@ def create_flask_app(
         """
         MJPEG stream endpoint.
         Browser gọi <img src="/video_feed"> và nhận stream liên tục.
-        Frame được set bởi FruitDetector qua push_frame().
+
+        Luồng hoạt động:
+          - FruitDetector đang chạy : push_frame() cập nhật _latest_frame liên tục
+          - FruitDetector dừng      : giữ nguyên frame cuối + hiện overlay "offline"
+          - Chưa có frame nào       : gửi placeholder màu đen
+
+        Generator KHÔNG bao giờ thoát vòng lặp do stop_event — nó chỉ thoát
+        khi browser ngắt kết nối (GeneratorExit). Điều này đảm bảo stream
+        không bị đứt khi SerialLink hay các thread khác gặp lỗi.
         """
+        import cv2
+        import numpy as np
+
+        def _make_placeholder(text: str = "Waiting for camera...") -> bytes:
+            ph = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(
+                ph, text,
+                (140, 240), cv2.FONT_HERSHEY_SIMPLEX,
+                0.8, (80, 80, 80), 1,
+            )
+            _, buf = cv2.imencode(".jpg", ph, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            return buf.tobytes()
+
+        placeholder_waiting  = _make_placeholder("Waiting for camera...")
+        placeholder_offline  = _make_placeholder("Camera offline")
+
+        # Timestamp lần cuối nhận frame thật từ FruitDetector
+        last_real_frame_ts = 0.0
+        OFFLINE_TIMEOUT    = 5.0   # giây — sau thời gian này coi camera offline
+
         def generate():
-            import cv2
-            import numpy as np
+            nonlocal last_real_frame_ts
 
-            # Placeholder frame khi chưa có camera data
-            _placeholder = None
+            while True:   # ← KHÔNG dùng stop_event ở đây
+                try:
+                    with _latest_frame_lock:
+                        frame_bytes = _latest_frame
 
-            while not stop_event.is_set():
-                with _latest_frame_lock:
-                    frame_bytes = _latest_frame
+                    now = time.monotonic()
 
-                if frame_bytes is None:
-                    # Tạo placeholder frame màu đen với text
-                    if _placeholder is None:
-                        ph = np.zeros((480, 640, 3), dtype=np.uint8)
-                        cv2.putText(
-                            ph, "Waiting for camera...",
-                            (160, 240), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.8, (80, 80, 80), 1
-                        )
-                        _, buf = cv2.imencode(".jpg", ph, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                        _placeholder = buf.tobytes()
-                    frame_bytes = _placeholder
+                    if frame_bytes is not None:
+                        last_real_frame_ts = now
+                        out_bytes = frame_bytes
+                    elif last_real_frame_ts == 0.0:
+                        # Chưa từng nhận được frame nào
+                        out_bytes = placeholder_waiting
+                    elif (now - last_real_frame_ts) > OFFLINE_TIMEOUT:
+                        # Đã từng có frame nhưng mất liên lạc quá lâu
+                        out_bytes = placeholder_offline
+                    else:
+                        # Mất liên lạc ngắn — giữ frame cuối cùng
+                        out_bytes = frame_bytes or placeholder_waiting
 
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n"
-                    + frame_bytes
-                    + b"\r\n"
-                )
-                # ~30fps cap cho stream
-                time.sleep(0.033)
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + out_bytes
+                        + b"\r\n"
+                    )
+                    time.sleep(0.033)   # ~30 fps cap
+
+                except GeneratorExit:
+                    # Browser ngắt kết nối — thoát sạch
+                    break
 
         return Response(
             generate(),

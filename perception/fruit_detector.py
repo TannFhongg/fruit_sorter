@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 
 from shared.detection_result import DetectionResult, FruitColor, SortAction
+from web.flask_app import push_frame, push_detection_event  # ← THÊM
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +153,10 @@ class FruitDetector(threading.Thread):
             self._frame_id += 1
             self._skip_counter += 1
 
+            # ── Push JPEG frame lên /video_feed ──────────────────────────
+            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            push_frame(jpeg.tobytes())
+
             # Frame skip: chỉ chạy NCNN mỗi _skip_n frame
             if self._skip_counter >= self._skip_n:
                 self._skip_counter = 0
@@ -162,6 +167,8 @@ class FruitDetector(threading.Thread):
                 if result:
                     with self.lock:
                         self.queue.append(result)
+                    # ── Push detection event lên dashboard ngay lập tức ──
+                    push_detection_event(det["label"], det["confidence"])
 
             elapsed = time.monotonic() - t0
             cycle_times.append(elapsed)
@@ -218,7 +225,7 @@ class FruitDetector(threading.Thread):
         W, H = self._input_wh
         blob_img, (px, py, sc) = _letterbox(frame, W, H)
 
-        # Bước 4: dùng PIXEL_BGR trực tiếp — bỏ cv2.cvtColor (tiết kiệm ~11ms)
+        # Dùng PIXEL_BGR trực tiếp — bỏ cv2.cvtColor (tiết kiệm ~11ms)
         mat_in = ncnn.Mat.from_pixels(
             blob_img, ncnn.Mat.PixelType.PIXEL_BGR, W, H
         )

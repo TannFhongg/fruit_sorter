@@ -102,7 +102,7 @@ model:
   type: "ncnn"
   input_size: [320, 320]
   num_threads: 4
-  #frame_skip: 2   
+  frame_skip: 3   
   use_gpu: false              # ← THÊM DÒNG NÀY — RPi4 không có Vulkan   
 
   thresholds:
