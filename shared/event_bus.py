@@ -63,7 +63,8 @@ class EventBus:
         with self._lock:
             if callback not in self._listeners[event]:
                 self._listeners[event].append(callback)
-                log.debug(f"EventBus: subscribed {callback.__qualname__!r} → '{event}'")
+                name = getattr(callback, "__qualname__", None) or getattr(callback, "__name__", repr(callback))
+                log.debug(f"EventBus: subscribed {name!r} → '{event}'")
 
     def unsubscribe(self, event: str, callback: Callable) -> None:
         """Remove *callback* from *event*. No-op if not registered."""
