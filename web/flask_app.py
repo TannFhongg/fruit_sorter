@@ -2,16 +2,34 @@
 web/flask_app.py  ·  Thread 3 — Flask + Flask-SocketIO
 =========================================================
 Routes:
-  GET  /                    → templates/index.html (Dashboard)
-  GET  /video_feed          → MJPEG stream từ shared frame buffer
+  GET  /                     → templates/index.html (Dashboard)
+  GET  /video_feed           → MJPEG stream from shared frame buffer
   GET  /api/stats/live
   GET  /api/stats/today
-  GET  /api/stats/history   ?days=7
-  GET  /api/events/recent   ?limit=50
+  GET  /api/stats/history    ?days=7
+  GET  /api/events/recent    ?limit=50
   GET  /api/health
-  WS   stats_update         → broadcast mỗi push_interval_s
-  WS   detection            → push ngay khi FruitDetector detect được vật thể
-  WS   sort_event           → push ngay khi servo kích
+  WS   stats_update          → broadcast every push_interval_s
+  WS   detection             → pushed when FruitDetector detects an object
+  WS   sort_event            → pushed when a servo fires
+
+Circular-import fix (Issue #3)
+-------------------------------
+Previously, fruit_detector.py and sort_controller.py imported
+push_frame / push_detection_event / update_live_count directly from this
+module.  This created a fragile load-order dependency: flask_app had to
+be fully initialised before those modules imported it, but flask_app
+itself is set up *after* the other modules are constructed in main.py.
+
+Fix: this module no longer exports any push_* functions for other modules
+to call.  Instead, it *subscribes* to events on the shared event bus at
+startup.  Perception and control modules publish events; this module
+reacts to them.  The dependency arrow is reversed — only this module
+knows about the event bus; perception and control do not know this module
+exists.
+
+Wiring is done in create_flask_app(), which is called once by main.py
+after all modules are constructed.
 """
 
 from __future__ import annotations
@@ -25,40 +43,37 @@ from flask import Flask, Response, jsonify, render_template, request
 from flask_socketio import SocketIO
 
 import database.db_queries as Q
+from shared.event_bus import EVT_DETECTION, EVT_FRAME, EVT_SORT_DONE, bus
 
 log = logging.getLogger(__name__)
 
-# ── In-memory live counters ────────────────────────────────────────────────
+# ── In-memory live counters (written by _on_sort_done, read by push loop) ──
 _live: dict = defaultdict(int)
+_live_lock  = threading.Lock()   # guards _live across threads
 
-# ── Shared latest frame (JPEG bytes, set bởi FruitDetector) ──────────────
+# ── Shared latest frame (JPEG bytes) ──────────────────────────────────────
 _latest_frame_lock = threading.Lock()
-_latest_frame      = None   # bytes (JPEG-encoded) hoặc None
+_latest_frame: bytes | None = None
+
+# ── SocketIO singleton ref (set inside create_flask_app) ─────────────────
+_socketio_ref: SocketIO | None = None
 
 
-def update_live_count(color: str, is_reject: bool = False) -> None:
-    """Gọi từ SortController (thread 2) sau mỗi sort event."""
-    if is_reject:
-        _live["rejects"] += 1
-    else:
-        _live[color] += 1
+# ── Event-bus callbacks ───────────────────────────────────────────────────
+#
+# These are registered in create_flask_app() and called by the emitter's
+# thread (CaptureThread / InferenceLoop / SortController).
+# They must be fast and non-blocking.
 
-
-def push_frame(jpeg_bytes: bytes) -> None:
-    """
-    Gọi từ FruitDetector (thread 1) mỗi frame.
-    Lưu frame mới nhất vào buffer để /video_feed stream ra.
-    """
+def _on_frame(jpeg_bytes: bytes) -> None:
+    """Store the latest camera frame for the MJPEG endpoint."""
     global _latest_frame
     with _latest_frame_lock:
         _latest_frame = jpeg_bytes
 
 
-def push_detection_event(label: str, confidence: float) -> None:
-    """
-    Gọi từ FruitDetector khi detect được vật thể.
-    Push ngay lên dashboard qua SocketIO.
-    """
+def _on_detection(label: str, confidence: float) -> None:
+    """Push a detection event to all connected dashboard clients."""
     if _socketio_ref:
         _socketio_ref.emit("detection", {
             "label":      label,
@@ -67,15 +82,16 @@ def push_detection_event(label: str, confidence: float) -> None:
         })
 
 
-def push_sort_event(event_data: dict) -> None:
-    """Gọi từ SortController sau khi servo kích xong."""
-    if _socketio_ref:
-        _socketio_ref.emit("sort_event", event_data)
+def _on_sort_done(fruit_color: str, is_reject: bool) -> None:
+    """Update in-memory live counters when a sort completes."""
+    with _live_lock:
+        if is_reject:
+            _live["rejects"] += 1
+        else:
+            _live[fruit_color] += 1
 
 
-# Ref đến socketio để push từ thread khác
-_socketio_ref: SocketIO | None = None
-
+# ── Factory ───────────────────────────────────────────────────────────────
 
 def create_flask_app(
     cfg: dict,
@@ -100,31 +116,40 @@ def create_flask_app(
     )
     _socketio_ref = socketio
 
+    # ── Wire event bus → this module ──────────────────────────────────────
+    #
+    # All subscriptions happen here, after socketio is assigned to
+    # _socketio_ref, so callbacks that emit SocketIO events are safe.
+    bus.subscribe(EVT_FRAME,     _on_frame)
+    bus.subscribe(EVT_DETECTION, _on_detection)
+    bus.subscribe(EVT_SORT_DONE, _on_sort_done)
+    log.info("flask_app: subscribed to event bus (frame / detection / sort_done)")
+
     db_path  = cfg["database"]["path"]
     push_ivl = cfg["dashboard"]["push_interval_s"]
 
     # ── HTML Dashboard ─────────────────────────────────────────────────────
 
     @app.route("/")
-    def dashboard():
+    def dashboard() -> str:
         return render_template("index.html")
 
     # ── MJPEG Video stream ─────────────────────────────────────────────────
 
     @app.route("/video_feed")
-    def video_feed():
+    def video_feed() -> Response:
         """
         MJPEG stream endpoint.
-        Browser gọi <img src="/video_feed"> và nhận stream liên tục.
+        The browser renders <img src="/video_feed"> as a live video feed.
 
-        Luồng hoạt động:
-          - FruitDetector đang chạy : push_frame() cập nhật _latest_frame liên tục
-          - FruitDetector dừng      : giữ nguyên frame cuối + hiện overlay "offline"
-          - Chưa có frame nào       : gửi placeholder màu đen
+        Frame lifecycle:
+          • FruitDetector running  : _on_frame() updates _latest_frame continuously
+          • FruitDetector stopped  : last frame is held; overlay shows "offline"
+          • No frame ever received : black placeholder shown
 
-        Generator KHÔNG bao giờ thoát vòng lặp do stop_event — nó chỉ thoát
-        khi browser ngắt kết nối (GeneratorExit). Điều này đảm bảo stream
-        không bị đứt khi SerialLink hay các thread khác gặp lỗi.
+        The generator loop exits only on GeneratorExit (browser disconnect),
+        never on stop_event, so the stream is resilient to transient errors
+        in other threads.
         """
         import cv2
         import numpy as np
@@ -139,17 +164,15 @@ def create_flask_app(
             _, buf = cv2.imencode(".jpg", ph, [cv2.IMWRITE_JPEG_QUALITY, 70])
             return buf.tobytes()
 
-        placeholder_waiting  = _make_placeholder("Waiting for camera...")
-        placeholder_offline  = _make_placeholder("Camera offline")
+        placeholder_waiting = _make_placeholder("Waiting for camera...")
+        placeholder_offline = _make_placeholder("Camera offline")
 
-        # Timestamp lần cuối nhận frame thật từ FruitDetector
         last_real_frame_ts = 0.0
-        OFFLINE_TIMEOUT    = 5.0   # giây — sau thời gian này coi camera offline
+        OFFLINE_TIMEOUT    = 5.0  # seconds
 
         def generate():
             nonlocal last_real_frame_ts
-
-            while True:   # ← KHÔNG dùng stop_event ở đây
+            while True:
                 try:
                     with _latest_frame_lock:
                         frame_bytes = _latest_frame
@@ -160,13 +183,10 @@ def create_flask_app(
                         last_real_frame_ts = now
                         out_bytes = frame_bytes
                     elif last_real_frame_ts == 0.0:
-                        # Chưa từng nhận được frame nào
                         out_bytes = placeholder_waiting
                     elif (now - last_real_frame_ts) > OFFLINE_TIMEOUT:
-                        # Đã từng có frame nhưng mất liên lạc quá lâu
                         out_bytes = placeholder_offline
                     else:
-                        # Mất liên lạc ngắn — giữ frame cuối cùng
                         out_bytes = frame_bytes or placeholder_waiting
 
                     yield (
@@ -175,10 +195,9 @@ def create_flask_app(
                         + out_bytes
                         + b"\r\n"
                     )
-                    time.sleep(0.033)   # ~30 fps cap
+                    time.sleep(0.033)  # ~30 fps cap
 
                 except GeneratorExit:
-                    # Browser ngắt kết nối — thoát sạch
                     break
 
         return Response(
@@ -188,7 +207,7 @@ def create_flask_app(
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma":        "no-cache",
                 "Expires":       "0",
-            }
+            },
         )
 
     # ── REST API ───────────────────────────────────────────────────────────
@@ -199,10 +218,16 @@ def create_flask_app(
 
     @app.route("/api/stats/live")
     def stats_live():
-        g, r, y = _live["GREEN"], _live["RED"], _live["YELLOW"]
+        with _live_lock:
+            g   = _live["GREEN"]
+            r   = _live["RED"]
+            y   = _live["YELLOW"]
+            rej = _live["rejects"]
         return jsonify({
-            "GREEN": g, "RED": r, "YELLOW": y,
-            "rejects": _live["rejects"],
+            "GREEN":   g,
+            "RED":     r,
+            "YELLOW":  y,
+            "rejects": rej,
             "total":   g + r + y,
             "ts":      time.time(),
         })
@@ -225,14 +250,20 @@ def create_flask_app(
     def stats_hourly():
         return jsonify(Q.get_hourly_breakdown(db_path))
 
-    # ── SocketIO background push ───────────────────────────────────────────
+    # ── SocketIO — background stats push ──────────────────────────────────
 
-    def _push_loop():
+    def _push_loop() -> None:
         while not stop_event.is_set():
-            g, r, y = _live["GREEN"], _live["RED"], _live["YELLOW"]
+            with _live_lock:
+                g   = _live["GREEN"]
+                r   = _live["RED"]
+                y   = _live["YELLOW"]
+                rej = _live["rejects"]
             socketio.emit("stats_update", {
-                "GREEN":   g, "RED": r, "YELLOW": y,
-                "rejects": _live["rejects"],
+                "GREEN":   g,
+                "RED":     r,
+                "YELLOW":  y,
+                "rejects": rej,
                 "total":   g + r + y,
                 "ts":      time.time(),
             })
@@ -242,10 +273,10 @@ def create_flask_app(
 
     @socketio.on("connect")
     def on_connect():
-        log.info(f"SocketIO client connected: {request.sid}")
+        log.info("SocketIO client connected: %s", request.sid)
 
     @socketio.on("disconnect")
     def on_disconnect():
-        log.info(f"SocketIO client disconnected: {request.sid}")
+        log.info("SocketIO client disconnected: %s", request.sid)
 
     return app, socketio
