@@ -29,31 +29,60 @@
  * =====================================================================
  * ISR-safety fix (Issue #2)
  * =====================================================================
- * PROBLEM: The previous firmware called millis() inside the ISR to
- * implement debouncing.  millis() internally reads the timer0 overflow
- * counter, which is updated by its own interrupt.  Calling millis()
- * inside another ISR can produce incorrect values because timer0
- * interrupts are masked while the ISR runs on AVR (no nested interrupts
- * by default), and the value may be stale or partially updated.
+ * ISRs only set a volatile flag — no millis(), no Serial.
+ * Debounce and event emission both live in loop().
+ * See original comments for full rationale.
  *
- * RULE: ISRs must be as short as possible.  They should only:
- *   • Set a volatile flag (done atomically on AVR).
- *   • Optionally record a pre-computed timestamp.
- * All other logic must live in loop().
+ * =====================================================================
+ * Bug fix — Non-blocking servo actuation
+ * =====================================================================
+ * PROBLEM: The previous firmware called delay(SERVO_HOLD_MS) inside
+ * actuate_servo(), which is invoked from loop():
  *
- * FIXED PATTERN:
- *   ISR  → sets volatile bool ir1_pending = true.
- *            Records nothing (no millis() call here).
- *   loop → when ir1_pending is seen:
- *            1. Read millis() safely (interrupts re-enabled in loop).
- *            2. Compare with last_ir1_ms for debounce.
- *            3. If debounce passes: send IR_TRIGGER, update last_ir1_ms.
- *            4. Clear ir1_pending.
+ *   void actuate_servo(...) {
+ *       srv.write(angle);
+ *       delay(SERVO_HOLD_MS);   // ← busy-wait, blocks ALL of loop()
+ *       srv.write(neutral);
+ *   }
  *
- * This guarantees:
- *   • ISR executes in < 10 CPU cycles (set one byte, reti).
- *   • millis() is only ever called from loop() where interrupts are on.
- *   • Debounce logic is deterministic and fully testable on a PC.
+ * delay() is a busy-wait on AVR — it spins until the timer counter
+ * reaches the target value.  While spinning, loop() cannot run.
+ * Hardware interrupts still fire (ISRs execute), so ir1_pending /
+ * ir2_pending get set correctly — but because loop() is blocked,
+ * those flags are never read, debounced, or forwarded to the Master
+ * until delay() returns.
+ *
+ * Real-world impact: conveyor at 0.3 m/s, fruit spacing 15 cm →
+ * inter-fruit interval ≈ 500 ms = SERVO_HOLD_MS.  Any IR event that
+ * fires while the servo is holding its angle is silently dropped.
+ * The Master never sees the trigger, so the second fruit is never
+ * sorted.
+ *
+ * FIXED PATTERN — software timer (non-blocking):
+ *
+ *   actuate_servo() now:
+ *     1. Writes the target angle to the servo.
+ *     2. Records the scheduled return time:
+ *          servo_return_at = millis() + SERVO_HOLD_MS
+ *     3. Sets a servo_returning flag.
+ *     4. Returns immediately — does NOT block.
+ *
+ *   check_servo_returns(), called at the TOP of every loop() iteration:
+ *     1. Reads millis().
+ *     2. For each servo: if returning && now >= return_at → write neutral.
+ *     3. Clears the returning flag and busy flag.
+ *
+ * This keeps loop() running continuously regardless of servo state.
+ * IR events are processed within one loop() iteration (< 1 ms) even
+ * while a servo is holding its sort position.
+ *
+ * SORT_DONE response change:
+ *   Because actuate_servo() now returns before the hold completes, we
+ *   cannot measure the actual hold duration with millis() anymore.
+ *   The SORT_DONE ACK is sent immediately with the *nominal* hold time
+ *   (SERVO_HOLD_MS constant) instead of a measured value.  The Master
+ *   already treats SORT_DONE as "command accepted", not "servo returned
+ *   to neutral", so this semantic change is compatible.
  * =====================================================================
  */
 
@@ -81,39 +110,35 @@
 #define SERIAL_BAUD  115200
 
 // ── ISR state — ONLY flags; no timestamps, no millis() calls ─────────────
-//
-// volatile: prevents the compiler from caching in a register.
-// The ISR writes; loop() reads and clears.  On AVR, a single-byte
-// read/write is atomic, so no additional locking is needed here.
 volatile bool ir1_pending = false;
 volatile bool ir2_pending = false;
 
 // ── Debounce state — owned exclusively by loop() ──────────────────────────
-//
-// These variables are read and written only inside loop(), which runs with
-// interrupts enabled.  They are NOT volatile because ISRs never touch them.
 uint32_t last_ir1_ms = 0;
 uint32_t last_ir2_ms = 0;
 
-// ── Other state ───────────────────────────────────────────────────────────
+// ── Servo state ───────────────────────────────────────────────────────────
 Servo    servo1, servo2;
+
+// busy flag: true while the servo is away from neutral (sorting or returning)
 bool     servo1_busy = false;
 bool     servo2_busy = false;
-uint32_t boot_ms     = 0;
+
+// Non-blocking return timer state.
+// returning flag : true while the servo is holding its sort angle and
+//                  waiting to return to neutral.
+// return_at      : the millis() value at which to write neutral.
+bool     servo1_returning = false;
+bool     servo2_returning = false;
+uint32_t servo1_return_at = 0;
+uint32_t servo2_return_at = 0;
+
+// ── Other state ───────────────────────────────────────────────────────────
+uint32_t boot_ms = 0;
 
 // ── ISRs ──────────────────────────────────────────────────────────────────
-//
-// Each ISR does exactly ONE thing: set a flag.
-// No millis(), no Serial, no arithmetic — just a single volatile write.
-// This keeps ISR latency under ~6 CPU cycles on an ATmega328P.
-
-void isr_ir1() {
-  ir1_pending = true;
-}
-
-void isr_ir2() {
-  ir2_pending = true;
-}
+void isr_ir1() { ir1_pending = true; }
+void isr_ir2() { ir2_pending = true; }
 
 // ── Setup ─────────────────────────────────────────────────────────────────
 void setup() {
@@ -137,7 +162,7 @@ void setup() {
 
   StaticJsonDocument<64> doc;
   doc["boot"]     = "ok";
-  doc["firmware"] = "FruitSorter-v2.1";
+  doc["firmware"] = "FruitSorter-v2.2";
   serializeJson(doc, Serial);
   Serial.println();
 
@@ -148,29 +173,62 @@ void setup() {
   }
 }
 
+// ── Non-blocking servo return checker ─────────────────────────────────────
+//
+// Called at the TOP of every loop() iteration — O(1), always fast.
+// Checks whether either servo has held its sort angle long enough and
+// needs to return to neutral.
+//
+// This replaces the blocking delay(SERVO_HOLD_MS) that was inside
+// actuate_servo().  Because this runs on every loop() pass, the servo
+// returns to neutral within 1 loop iteration (< 1 ms) of the deadline,
+// which is far more accurate than a busy-wait delay() and — crucially —
+// does not block IR event processing.
+
+void check_servo_returns() {
+  uint32_t now = millis();
+
+  if (servo1_returning && (now >= servo1_return_at)) {
+    servo1.write(S1_NEUTRAL);
+    servo1_busy      = false;
+    servo1_returning = false;
+    // Turn off the LED only when both servos are back at neutral
+    if (!servo2_busy) {
+      digitalWrite(PIN_STATUS_LED, LOW);
+    }
+  }
+
+  if (servo2_returning && (now >= servo2_return_at)) {
+    servo2.write(S2_NEUTRAL);
+    servo2_busy      = false;
+    servo2_returning = false;
+    if (!servo1_busy) {
+      digitalWrite(PIN_STATUS_LED, LOW);
+    }
+  }
+}
+
 // ── Main loop ─────────────────────────────────────────────────────────────
 //
 // Interrupts are ENABLED here, so millis() is safe to call.
-// Debounce and event emission both live here — not in the ISRs.
+// check_servo_returns() runs first every iteration so return timing is
+// as accurate as possible regardless of Serial or IR processing time.
 
 void loop() {
-  // ── Process IR1 ──────────────────────────────────────────────────────
-  //
-  // Read the volatile flag into a local variable, clear it atomically,
-  // then perform debounce.  The flag is cleared before the debounce check
-  // so that rapid re-triggers are not silently lost: if ir1_pending is
-  // set again while we process this one, we will see it on the next
-  // loop() iteration.
+  // ── 1. Service servo return timers (non-blocking) ─────────────────
+  check_servo_returns();
+
+  // ── 2. Process IR1 ───────────────────────────────────────────────
   if (ir1_pending) {
     ir1_pending = false;                      // clear BEFORE reading millis()
-    uint32_t now = millis();                  // safe here — interrupts ON
+    uint32_t now = millis();
     if (now - last_ir1_ms >= DEBOUNCE_MS) {
       last_ir1_ms = now;
       send_ir_trigger(1, now);
     }
   }
 
-  // ── Process IR2 ──────────────────────────────────────────────────────
+  // ── 3. Process IR2 ───────────────────────────────────────────────
   if (ir2_pending) {
     ir2_pending = false;
     uint32_t now = millis();
@@ -180,7 +238,7 @@ void loop() {
     }
   }
 
-  // ── Process incoming Serial commands ─────────────────────────────────
+  // ── 4. Process incoming Serial commands ──────────────────────────
   if (Serial.available() > 0) {
     String line = Serial.readStringUntil('\n');
     line.trim();
@@ -216,14 +274,15 @@ void handle_command(const String& raw) {
     uint8_t     servo_id  = doc["servo"]  | 0;
     const char* direction = doc["dir"]    | "neutral";
 
-    uint32_t t0 = millis();
+    // actuate_servo() now returns immediately (non-blocking).
+    // We report the *nominal* hold time instead of measuring it,
+    // because the actual return happens asynchronously in loop().
     actuate_servo(servo_id, direction);
-    uint32_t dur = millis() - t0;
 
     StaticJsonDocument<80> resp;
     resp["ack"]   = "SORT_DONE";
     resp["servo"] = servo_id;
-    resp["ms"]    = dur;
+    resp["ms"]    = SERVO_HOLD_MS;   // nominal — actual return is async
     serializeJson(resp, Serial);
     Serial.println();
   }
@@ -239,21 +298,30 @@ void handle_command(const String& raw) {
   else if (strcmp(cmd, "RESET") == 0) {
     servo1.write(S1_NEUTRAL);
     servo2.write(S2_NEUTRAL);
-    servo1_busy = false;
-    servo2_busy = false;
+    servo1_busy      = false;
+    servo2_busy      = false;
+    servo1_returning = false;
+    servo2_returning = false;
+    digitalWrite(PIN_STATUS_LED, LOW);
     Serial.println("{\"ack\":\"RESET_DONE\"}");
   }
 
   else if (strcmp(cmd, "STATUS") == 0) {
-    StaticJsonDocument<128> resp;
-    resp["ack"]         = "STATUS";
-    resp["servo1_ok"]   = servo1.attached();
-    resp["servo2_ok"]   = servo2.attached();
-    resp["servo1_busy"] = servo1_busy;
-    resp["servo2_busy"] = servo2_busy;
-    resp["ir1_pin"]     = digitalRead(PIN_IR1);
-    resp["ir2_pin"]     = digitalRead(PIN_IR2);
-    resp["uptime_s"]    = (millis() - boot_ms) / 1000UL;
+    StaticJsonDocument<160> resp;
+    resp["ack"]            = "STATUS";
+    resp["servo1_ok"]      = servo1.attached();
+    resp["servo2_ok"]      = servo2.attached();
+    resp["servo1_busy"]    = servo1_busy;
+    resp["servo2_busy"]    = servo2_busy;
+    resp["servo1_ret_ms"]  = servo1_returning
+                               ? (int32_t)(servo1_return_at - millis())
+                               : 0;
+    resp["servo2_ret_ms"]  = servo2_returning
+                               ? (int32_t)(servo2_return_at - millis())
+                               : 0;
+    resp["ir1_pin"]        = digitalRead(PIN_IR1);
+    resp["ir2_pin"]        = digitalRead(PIN_IR2);
+    resp["uptime_s"]       = (millis() - boot_ms) / 1000UL;
     serializeJson(resp, Serial);
     Serial.println();
   }
@@ -263,10 +331,26 @@ void handle_command(const String& raw) {
   }
 }
 
-// ── Actuate a servo by id and direction ──────────────────────────────────
+// ── Actuate a servo — NON-BLOCKING ────────────────────────────────────────
+//
+// Writes the target angle and schedules the return to neutral via a
+// software timer.  Returns immediately — does NOT call delay().
+//
+// The actual return to neutral is performed by check_servo_returns()
+// on the next loop() iteration after millis() >= servo_return_at.
+//
+// Concurrency note: if a second SORT command arrives for the same servo
+// while it is still holding its sort angle (servo_busy == true), the
+// new command overwrites the angle and resets the return timer.  This
+// is safe because all state writes happen in loop() with interrupts
+// enabled but Serial reads are sequential — two SORT commands cannot
+// be processed simultaneously on a single-core AVR.
+
 void actuate_servo(uint8_t id, const char* direction) {
-  Servo& srv      = (id == 1) ? servo1 : servo2;
-  bool&  busy_ref = (id == 1) ? servo1_busy : servo2_busy;
+  Servo&    srv        = (id == 1) ? servo1    : servo2;
+  bool&     busy_ref   = (id == 1) ? servo1_busy      : servo2_busy;
+  bool&     ret_ref    = (id == 1) ? servo1_returning  : servo2_returning;
+  uint32_t& ret_at_ref = (id == 1) ? servo1_return_at  : servo2_return_at;
 
   int angle;
   if (id == 1) {
@@ -279,16 +363,20 @@ void actuate_servo(uint8_t id, const char* direction) {
     else                                       angle = S2_NEUTRAL;
   }
 
-  busy_ref = true;
-  digitalWrite(PIN_STATUS_LED, HIGH);
+  // Write target angle
   srv.write(angle);
-  delay(SERVO_HOLD_MS);
-  srv.write((id == 1) ? S1_NEUTRAL : S2_NEUTRAL);
-  digitalWrite(PIN_STATUS_LED, LOW);
-  busy_ref = false;
+  digitalWrite(PIN_STATUS_LED, HIGH);
+
+  // Schedule return to neutral — non-blocking
+  busy_ref   = true;
+  ret_ref    = true;
+  ret_at_ref = millis() + SERVO_HOLD_MS;
+
+  // Return immediately.  check_servo_returns() will write neutral
+  // once SERVO_HOLD_MS ms have elapsed.
 }
 
-// ── Send an error message to Master ──────────────────────────────────────
+// ── Send an error message to Master ───────────────────────────────────────
 void send_error(const char* msg) {
   StaticJsonDocument<64> doc;
   doc["ack"] = "ERROR";

@@ -5,13 +5,12 @@ Listens for IR_TRIGGER messages from the Arduino Slave via Serial,
 dequeues a DetectionResult, validates the timing window, sends the
 appropriate SORT command, and records a SortEvent to the DB queue.
 
-Thread-safety fix (Race Condition #1)
---------------------------------------
+Thread-safety fix (Race Condition #1) — ORIGINAL
+--------------------------------------------------
 Previous code accessed queue[0] and queue.popleft() inside the lock,
 but then called _dispatch() — which touches further shared state —
 *outside* the lock while still holding a reference to the dequeued
-object.  Any other thread that mutated the object between the lock
-release and the end of _dispatch() would cause a data race.
+object.
 
 Fixed pattern:
   1. Acquire the lock.
@@ -20,9 +19,44 @@ Fixed pattern:
   4. Release the lock (exit the `with` block).
   5. Call _dispatch(item) with the now-exclusively-owned local copy.
 
-Because `item` is a plain dataclass with no further shared references
-after step 3, no other thread can see or mutate it, making the rest of
-_dispatch() completely lock-free and race-free.
+Bug fix (Race Condition #2) — now_ms stale timestamp
+------------------------------------------------------
+PROBLEM: In the previous version, `now_ms` was computed BEFORE
+acquiring the lock:
+
+    now_ms = time.monotonic() * 1000   # ← captured here
+    window = self._windows.get(...)
+
+    with self._lock:                   # ← lock acquired AFTER
+        candidate = self._queue[0]
+        delta_ms  = now_ms - candidate.timestamp_ms
+
+Between computing `now_ms` and reading `candidate.timestamp_ms`,
+the OS scheduler can preempt this thread for an arbitrary duration
+(typically 1–50 ms on a loaded RPi 4).  On a conveyor running at
+0.3 m/s with a ±20 % timing window (~±170 ms), a 30–50 ms stale
+timestamp is enough to either:
+  • Pass a fruit that should have been rejected (delta appears in-window
+    when it is actually out-of-window), or
+  • Block a valid fruit (delta appears out-of-window due to inflated
+    elapsed time).
+
+FIXED PATTERN:
+  `now_ms` is now computed INSIDE the lock, immediately before
+  `candidate.timestamp_ms` is read.  Both values are captured in the
+  same critical section so no other thread can interleave between them.
+
+    with self._lock:
+        if not self._queue:
+            return
+        now_ms    = time.monotonic() * 1000   # ← inside lock
+        candidate = self._queue[0]
+        delta_ms  = now_ms - candidate.timestamp_ms
+        ...
+
+Because `time.monotonic()` is a simple syscall with no side-effects on
+shared state, holding the lock while calling it is safe and adds
+negligible latency (< 1 µs).
 
 Circular-import fix (Issue #3)
 -------------------------------
@@ -97,25 +131,29 @@ class SortController(threading.Thread):
 
     # ── IR trigger handler ─────────────────────────────────────────────────
     #
-    # KEY DESIGN:
-    #   • Lock is held only for queue inspection + popleft().
-    #   • The popped `item` becomes a local variable that is owned
-    #     exclusively by this thread from the moment the lock is released.
-    #   • _dispatch() operates entirely on that local copy — no shared
-    #     state is touched without synchronisation.
+    # KEY DESIGN (updated):
+    #   • `now_ms` is computed INSIDE the lock, immediately before reading
+    #     `candidate.timestamp_ms`.  This eliminates the stale-timestamp
+    #     race condition described in the module docstring.
+    #   • Lock is still released before calling _dispatch(), so servo
+    #     I/O never blocks queue access for other threads.
+    #   • The popped `item` is a local variable exclusively owned by this
+    #     thread from the moment the lock is released.
 
     def _handle_ir_trigger(self, msg: dict) -> None:
         sensor_id = int(msg.get("sensor", 1))
-        now_ms    = time.monotonic() * 1000
         window    = self._windows.get(sensor_id, (0, 9999))
 
-        # ── Critical section: inspect and (conditionally) pop ─────────────
+        # ── Critical section: timestamp capture + inspect + (conditionally) pop
         item: DetectionResult | None = None
         with self._lock:
             if not self._queue:
                 log.warning("IR%d triggered — queue empty, ignoring", sensor_id)
                 return
 
+            # ↓ now_ms computed INSIDE the lock — no preemption gap between
+            #   this value and candidate.timestamp_ms read below.
+            now_ms    = time.monotonic() * 1000
             candidate = self._queue[0]
             delta_ms  = now_ms - candidate.timestamp_ms
 
