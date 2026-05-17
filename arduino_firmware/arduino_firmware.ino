@@ -307,7 +307,7 @@ void handle_command(const String& raw) {
   }
 
   else if (strcmp(cmd, "STATUS") == 0) {
-    StaticJsonDocument<160> resp;
+    StaticJsonDocument<256> resp;
     resp["ack"]            = "STATUS";
     resp["servo1_ok"]      = servo1.attached();
     resp["servo2_ok"]      = servo2.attached();
@@ -324,6 +324,7 @@ void handle_command(const String& raw) {
     resp["uptime_s"]       = (millis() - boot_ms) / 1000UL;
     serializeJson(resp, Serial);
     Serial.println();
+
   }
 
   else {

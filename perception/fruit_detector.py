@@ -8,19 +8,55 @@ Two-thread internal architecture:
 Result: camera never waits for NCNN; NCNN never waits for camera.
 Target: 25–30 FPS on RPi4 with 320×320 input.
 
-Circular-import fix (Issue #3)
--------------------------------
-Previous version imported push_frame / push_detection_event directly from
-web.flask_app at module level.  flask_app in turn is set up by main.py
-*after* this module is imported, creating a fragile load-order dependency
-that would break with any import-order change.
+=======================================================================
+Bug Fix — Frame skip causes duplicate detection enqueue
+=======================================================================
+PROBLEM (original code):
 
-Fixed by publishing through the shared event bus instead:
+    if self._skip_counter >= self._skip_n:
+        self._skip_counter = 0
+        self._last_dets = self._run_inference(frame)   # every N frames
+
+    for det in self._last_dets:           # ← runs EVERY frame
+        result = self._build_result(det)
+        if result:
+            with self.lock:
+                self.queue.append(result)  # pushed N times for same fruit!
+
+_last_dets persists between frames. With frame_skip=3, the same
+detection is enqueued 3 times. SortController sees 3 entries for
+one fruit and sends 3 SORT commands → servo fires 3 times.
+
+FIXED PATTERN — dequeue only on inference frames:
+
+    ran_inference = False
+    if self._skip_counter >= self._skip_n:
+        self._skip_counter = 0
+        self._last_dets    = self._run_inference(frame)
+        ran_inference      = True
+
+    if ran_inference:               # ← only push on the frame we inferred
+        for det in self._last_dets:
+            ...
+            self.queue.append(result)
+
+_last_dets is still kept for drawing bounding boxes on the video
+stream (the EVT_FRAME path), but it is never used for queue pushes
+on non-inference frames.
+
+Why not clear _last_dets on non-inference frames?
+    Clearing would be correct for the queue, but the visual overlay
+    would flicker every N frames (bounding box appears 1 frame out of
+    every N). Keeping the separation between "draw" and "enqueue"
+    is the right architectural fix: each concern uses _last_dets
+    differently and that's fine.
+
+=======================================================================
+Circular-import fix (Issue #3) — unchanged from v2
+=======================================================================
+Publishes through the shared event bus instead of importing flask_app.
     bus.emit(EVT_FRAME, jpeg_bytes)
     bus.emit(EVT_DETECTION, label=..., confidence=...)
-
-flask_app subscribes to both events at startup (wired in main.py).
-This module has zero knowledge of the web layer.
 """
 
 from __future__ import annotations
@@ -71,7 +107,7 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> list[int]:
 class _CaptureThread(threading.Thread):
     """
     Background thread: reads the camera as fast as possible into a
-    2-slot ring buffer.  InferenceLoop always picks up the freshest frame.
+    2-slot ring buffer. InferenceLoop always picks up the freshest frame.
     maxlen=2: slot[0] = frame being inferred, slot[1] = next frame ready.
     """
 
@@ -144,6 +180,10 @@ class FruitDetector(threading.Thread):
 
         self._skip_n       = cfg.get("model", {}).get("frame_skip", 2)
         self._skip_counter = 0
+
+        # _last_dets: cached for OVERLAY DRAWING only.
+        # NEVER used to push into the detection queue on non-inference frames.
+        # See module docstring for the full explanation.
         self._last_dets: list[dict] = []
 
     # ── Thread body ────────────────────────────────────────────────────────
@@ -171,25 +211,39 @@ class FruitDetector(threading.Thread):
                 time.sleep(0.001)
                 continue
 
-            self._frame_id   += 1
+            self._frame_id     += 1
             self._skip_counter += 1
 
             # Publish JPEG frame to the event bus → flask_app streams it
             _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             bus.emit(EVT_FRAME, jpeg.tobytes())
 
-            # Frame skip: only run NCNN every _skip_n frames
+            # ── Frame skip: run NCNN inference only every _skip_n frames ──
+            #
+            # KEY INVARIANT: detection results are pushed into the shared
+            # queue ONLY on the frame where inference actually ran.
+            # _last_dets is updated here and may be used for overlay drawing
+            # on subsequent frames, but NEVER for queue pushes.
+            #
+            # Violation of this invariant causes duplicate enqueues:
+            #   frame_skip=3, fruit detected → 3 identical DetectionResults
+            #   → SortController sends 3 SORT commands → servo fires 3 times.
+
+            ran_inference = False
             if self._skip_counter >= self._skip_n:
                 self._skip_counter = 0
                 self._last_dets    = self._run_inference(frame)
+                ran_inference      = True
 
-            for det in self._last_dets:
-                result = self._build_result(det)
-                if result:
-                    with self.lock:
-                        self.queue.append(result)
-                    # Publish detection event → flask_app pushes to dashboard
-                    bus.emit(EVT_DETECTION, label=det["label"], confidence=det["confidence"])
+            if ran_inference:
+                # Enqueue detections ONLY on inference frames
+                for det in self._last_dets:
+                    result = self._build_result(det)
+                    if result:
+                        with self.lock:
+                            self.queue.append(result)
+                        # Publish detection event → flask_app pushes to dashboard
+                        bus.emit(EVT_DETECTION, label=det["label"], confidence=det["confidence"])
 
             elapsed = time.monotonic() - t0
             cycle_times.append(elapsed)
