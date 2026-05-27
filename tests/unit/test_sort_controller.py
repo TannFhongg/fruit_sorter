@@ -70,8 +70,8 @@ class TestFIFO:
 
     def test_oldest_consumed_first(self, controller):
         sc, q, *_ = controller
-        q.append(_make_det("GREEN", 850, SortAction.SERVO1_LEFT))
-        q.append(_make_det("RED",   200, SortAction.SERVO2_LEFT))
+        q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
+        q.append(_make_det("RED",   200, SortAction.PASS))
 
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
 
@@ -89,7 +89,7 @@ class TestTimingGate:
 
     def test_valid_window_consumes(self, controller):
         sc, q, _, dbq, serial = controller
-        q.append(_make_det("GREEN", 850, SortAction.SERVO1_LEFT))
+        q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))  # 850ms old → within 700-1000ms window for IR1               
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
         assert len(q) == 0
         serial.send.assert_called_once()
@@ -111,41 +111,43 @@ class TestTimingGate:
 
 class TestServoDispatch:
 
-    # ĐỔI các SortAction trong test fixtures:
-# SortAction.SERVO1_LEFT  → SortAction.SERVO1_FIRE
-# SortAction.SERVO2_LEFT  → SortAction.SERVO2_FIRE
-# SortAction.SERVO2_RIGHT → SortAction.SERVO2_FIRE
-# SortAction.REJECT       → SortAction.PASS (cho RED/UNKNOWN hợp lệ)
+    @pytest.mark.parametrize("color,action,expected_servo,expected_dir", [
+        ("GREEN",  SortAction.SERVO1_FIRE, 1, "fire"),
+        ("YELLOW", SortAction.SERVO2_FIRE, 2, "fire"),
+    ])
+    def test_correct_servo_command(
+        self, controller, color, action, expected_servo, expected_dir
+    ):
+        sc, q, _, _, serial = controller
+        q.append(_make_det(color, 850, action))
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
 
-@pytest.mark.parametrize("color,action,expected_servo,expected_dir", [
-    ("GREEN",  SortAction.SERVO1_FIRE, 1, "fire"),   # ← ĐỔI
-    ("YELLOW", SortAction.SERVO2_FIRE, 2, "fire"),   # ← ĐỔI
-    # RED không còn trong list này — RED không kích servo
-])
-def test_correct_servo_command(...):
-    ...
-    assert cmd["dir"] == "fire"    # ← ĐỔI: "left"/"right" → "fire"
+        import json
+        call_bytes = serial.send.call_args[0][0]
+        cmd = json.loads(call_bytes.decode().strip())
+        assert cmd["servo"] == expected_servo
+        assert cmd["dir"]   == expected_dir
 
-def test_red_no_servo_sent(self, controller):    # ← TEST MỚI
-    sc, q, _, dbq, serial = controller
-    q.append(_make_det("RED", 850, SortAction.PASS))
-    sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
-    serial.send.assert_not_called()
-    assert dbq[-1].is_reject is False    # RED là PASS, không phải reject
+    def test_red_no_servo_sent(self, controller):
+        sc, q, _, dbq, serial = controller
+        q.append(_make_det("RED", 850, SortAction.PASS))
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+        serial.send.assert_not_called()
+        assert dbq[-1].is_reject is False
 
-def test_reject_no_servo_sent(self, controller):
-    sc, q, _, dbq, serial = controller
-    q.append(_make_det("UNKNOWN", 850, SortAction.REJECT))
-    sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
-    serial.send.assert_not_called()
-    assert dbq[-1].is_reject is True    # UNKNOWN vẫn là reject thật
+    def test_reject_no_servo_sent(self, controller):
+        sc, q, _, dbq, serial = controller
+        q.append(_make_det("UNKNOWN", 850, SortAction.REJECT))
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+        serial.send.assert_not_called()
+        assert dbq[-1].is_reject is True
 
 
 class TestDbQueue:
 
     def test_event_pushed_after_sort(self, controller):
         sc, q, _, dbq, _ = controller
-        q.append(_make_det("RED", 850, SortAction.SERVO2_LEFT))
+        q.append(_make_det("RED", 850, SortAction.PASS))
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
         assert len(dbq) == 1
         ev = dbq[0]

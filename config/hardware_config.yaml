@@ -123,7 +123,7 @@ model:
   # Mapping nhãn → servo action
   routing:
     GREEN:   { servo: 1, direction: "fire"  }
-    RED:     { servo: 2, direction: "pass"  }
+    RED:     { servo: null, direction: "pass"  }
     YELLOW:  { servo: 2, direction: "fire" }
     UNKNOWN: { servo: null, direction: "pass" }
 

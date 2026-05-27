@@ -177,13 +177,13 @@ class SortController(threading.Thread):
     # thread-safe via its own internal lock inside SerialLink).
 
     def _dispatch(self, sensor_id: int, item: DetectionResult) -> None:
-    is_pass   = item.action == SortAction.PASS
-    is_reject = item.action == SortAction.REJECT
+        is_pass   = item.action == SortAction.PASS
+        is_reject = item.action == SortAction.REJECT
 
-    if is_pass or is_reject:
+        if is_pass or is_reject:
         status = "PASS" if is_pass else "REJECT"
         log.info("IR%d: %s → %s (no servo)", sensor_id, item.fruit_color.value, status)
-    else:
+        else:
         # SortAction.SERVO{n}_FIRE
         parts     = item.action.value.split("_")   # ["SERVO1", "FIRE"]
         servo_id  = int(parts[0].replace("SERVO", ""))
@@ -197,12 +197,12 @@ class SortController(threading.Thread):
             servo_id, item.confidence, status,
         )
 
-    bus.emit(
+        bus.emit(
         EVT_SORT_DONE,
         fruit_color=item.fruit_color.value,
         is_reject=(item.action == SortAction.REJECT),
     )
-    self._push_db_event(item, sensor_id, (item.action == SortAction.REJECT))
+        self._push_db_event(item, sensor_id, (item.action == SortAction.REJECT))
 
     # ── DB event ───────────────────────────────────────────────────────────
 
