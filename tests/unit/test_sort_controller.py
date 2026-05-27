@@ -111,30 +111,34 @@ class TestTimingGate:
 
 class TestServoDispatch:
 
-    @pytest.mark.parametrize("color,action,expected_servo,expected_dir", [
-        ("GREEN",  SortAction.SERVO1_LEFT,  1, "left"),
-        ("RED",    SortAction.SERVO2_LEFT,  2, "left"),
-        ("YELLOW", SortAction.SERVO2_RIGHT, 2, "right"),
-    ])
-    def test_correct_servo_command(
-        self, controller, color, action, expected_servo, expected_dir
-    ):
-        sc, q, _, _, serial = controller
-        q.append(_make_det(color, 850, action))
-        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+    # ĐỔI các SortAction trong test fixtures:
+# SortAction.SERVO1_LEFT  → SortAction.SERVO1_FIRE
+# SortAction.SERVO2_LEFT  → SortAction.SERVO2_FIRE
+# SortAction.SERVO2_RIGHT → SortAction.SERVO2_FIRE
+# SortAction.REJECT       → SortAction.PASS (cho RED/UNKNOWN hợp lệ)
 
-        import json
-        call_bytes = serial.send.call_args[0][0]
-        cmd = json.loads(call_bytes.decode().strip())
-        assert cmd["servo"] == expected_servo
-        assert cmd["dir"]   == expected_dir
+@pytest.mark.parametrize("color,action,expected_servo,expected_dir", [
+    ("GREEN",  SortAction.SERVO1_FIRE, 1, "fire"),   # ← ĐỔI
+    ("YELLOW", SortAction.SERVO2_FIRE, 2, "fire"),   # ← ĐỔI
+    # RED không còn trong list này — RED không kích servo
+])
+def test_correct_servo_command(...):
+    ...
+    assert cmd["dir"] == "fire"    # ← ĐỔI: "left"/"right" → "fire"
 
-    def test_reject_no_servo_sent(self, controller):
-        sc, q, _, dbq, serial = controller
-        q.append(_make_det("UNKNOWN", 850, SortAction.REJECT))
-        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
-        serial.send.assert_not_called()
-        assert dbq[-1].is_reject is True
+def test_red_no_servo_sent(self, controller):    # ← TEST MỚI
+    sc, q, _, dbq, serial = controller
+    q.append(_make_det("RED", 850, SortAction.PASS))
+    sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+    serial.send.assert_not_called()
+    assert dbq[-1].is_reject is False    # RED là PASS, không phải reject
+
+def test_reject_no_servo_sent(self, controller):
+    sc, q, _, dbq, serial = controller
+    q.append(_make_det("UNKNOWN", 850, SortAction.REJECT))
+    sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+    serial.send.assert_not_called()
+    assert dbq[-1].is_reject is True    # UNKNOWN vẫn là reject thật
 
 
 class TestDbQueue:

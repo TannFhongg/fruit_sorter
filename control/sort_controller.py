@@ -177,32 +177,32 @@ class SortController(threading.Thread):
     # thread-safe via its own internal lock inside SerialLink).
 
     def _dispatch(self, sensor_id: int, item: DetectionResult) -> None:
-        is_reject = item.action == SortAction.REJECT
+    is_pass   = item.action == SortAction.PASS
+    is_reject = item.action == SortAction.REJECT
 
-        if is_reject:
-            log.info("IR%d: %s → REJECT", sensor_id, item.fruit_color.value)
-        else:
-            # SortAction values follow the pattern "SERVO{n}_{DIRECTION}"
-            parts     = item.action.value.split("_")   # e.g. ["SERVO1", "LEFT"]
-            servo_id  = int(parts[0].replace("SERVO", ""))
-            direction = parts[1].lower()
+    if is_pass or is_reject:
+        status = "PASS" if is_pass else "REJECT"
+        log.info("IR%d: %s → %s (no servo)", sensor_id, item.fruit_color.value, status)
+    else:
+        # SortAction.SERVO{n}_FIRE
+        parts     = item.action.value.split("_")   # ["SERVO1", "FIRE"]
+        servo_id  = int(parts[0].replace("SERVO", ""))
+        direction = "fire"                          # ← luôn là "fire"
 
-            ok     = self._serial.send(cmd_sort(servo_id, direction))
-            status = "OK" if ok else "SERIAL_ERR"
-            log.info(
-                "IR%d: %s → SERVO%d %s [conf=%.2f] [%s]",
-                sensor_id, item.fruit_color.value,
-                servo_id, direction.upper(),
-                item.confidence, status,
-            )
+        ok     = self._serial.send(cmd_sort(servo_id, direction))
+        status = "OK" if ok else "SERIAL_ERR"
+        log.info(
+            "IR%d: %s → SERVO%d FIRE [conf=%.2f] [%s]",
+            sensor_id, item.fruit_color.value,
+            servo_id, item.confidence, status,
+        )
 
-        # Publish sort outcome on the event bus.
-        # flask_app subscribes to EVT_SORT_DONE to update live counters.
-        # No direct import of flask_app here — circular dependency is gone.
-        bus.emit(EVT_SORT_DONE, fruit_color=item.fruit_color.value, is_reject=is_reject)
-
-        # Persist the event asynchronously via the DB write queue
-        self._push_db_event(item, sensor_id, is_reject)
+    bus.emit(
+        EVT_SORT_DONE,
+        fruit_color=item.fruit_color.value,
+        is_reject=(item.action == SortAction.REJECT),
+    )
+    self._push_db_event(item, sensor_id, (item.action == SortAction.REJECT))
 
     # ── DB event ───────────────────────────────────────────────────────────
 

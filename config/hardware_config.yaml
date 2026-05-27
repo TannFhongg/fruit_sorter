@@ -57,28 +57,26 @@ hardware:
   ir_sensors:
     ir1:
       pin: 2                 # Arduino digital pin 2 (interrupt)
-      label: "station_1"     # Vị trí trước servo 1
+      label: "station_green"     # Vị trí trước servo 1
       debounce_ms: 20
     ir2:
       pin: 3                 # Arduino digital pin 3 (interrupt)
-      label: "station_2"     # Vị trí trước servo 2
+      label: "station_yellow"     # Vị trí trước servo 2
       debounce_ms: 20
 
   servos:
     servo1:
       pin: 9                 # Arduino PWM pin 9
-      label: "sorter_green"
-      angle_neutral: 90
-      angle_left: 45         # GREEN → trái
-      angle_right: 135       # Reject → phải
-      hold_ms: 500
+      label: "pusher_green"
+      angle_home: 0
+      angle_fire: 90
+      hold_ms: 150
     servo2:
       pin: 10                # Arduino PWM pin 10
-      label: "sorter_red_yellow"
-      angle_neutral: 90
-      angle_left: 50         # RED → trái
-      angle_right: 130       # YELLOW → phải
-      hold_ms: 500
+      label: "pusher_yellow"
+      angle_home: 0
+      angle_fire: 90 
+      hold_ms: 150
 
 # ---------------------------------------------------------------------------
 # CONVEYOR — băng chuyền
@@ -124,10 +122,10 @@ model:
 
   # Mapping nhãn → servo action
   routing:
-    GREEN:   { servo: 1, direction: "left"  }
-    RED:     { servo: 2, direction: "left"  }
-    YELLOW:  { servo: 2, direction: "right" }
-    UNKNOWN: { servo: null, direction: "reject" }
+    GREEN:   { servo: 1, direction: "fire"  }
+    RED:     { servo: 2, direction: "pass"  }
+    YELLOW:  { servo: 2, direction: "fire" }
+    UNKNOWN: { servo: null, direction: "pass" }
 
 # ---------------------------------------------------------------------------
 # DATABASE — SQLite

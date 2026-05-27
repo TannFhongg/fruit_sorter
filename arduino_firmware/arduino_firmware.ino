@@ -97,13 +97,11 @@
 #define PIN_STATUS_LED  13
 
 // ── Servo angles (sync with hardware_config.yaml) ─────────────────────────
-#define S1_NEUTRAL    90
-#define S1_LEFT       45
-#define S1_RIGHT     135
-#define S2_NEUTRAL    90
-#define S2_LEFT       50
-#define S2_RIGHT     130
-#define SERVO_HOLD_MS 500
+#define S1_HOME         0
+#define S1_FIRE         90
+#define S2_HOME         0
+#define S2_FIRE         90
+#define SERVO_HOLD_MS 150
 
 // ── Timing ────────────────────────────────────────────────────────────────
 #define DEBOUNCE_MS     20   // minimum ms between two valid triggers
@@ -147,8 +145,8 @@ void setup() {
 
   servo1.attach(PIN_SERVO1);
   servo2.attach(PIN_SERVO2);
-  servo1.write(S1_NEUTRAL);
-  servo2.write(S2_NEUTRAL);
+  servo1.write(S1_HOME);
+  servo2.write(S2_HOME);
 
   pinMode(PIN_IR1, INPUT_PULLUP);
   pinMode(PIN_IR2, INPUT_PULLUP);
@@ -189,22 +187,17 @@ void check_servo_returns() {
   uint32_t now = millis();
 
   if (servo1_returning && (now >= servo1_return_at)) {
-    servo1.write(S1_NEUTRAL);
+    servo1.write(S1_HOME);     // ← ĐỔI: S1_NEUTRAL → S1_HOME
     servo1_busy      = false;
     servo1_returning = false;
-    // Turn off the LED only when both servos are back at neutral
-    if (!servo2_busy) {
-      digitalWrite(PIN_STATUS_LED, LOW);
-    }
+    if (!servo2_busy) digitalWrite(PIN_STATUS_LED, LOW);
   }
 
   if (servo2_returning && (now >= servo2_return_at)) {
-    servo2.write(S2_NEUTRAL);
+    servo2.write(S2_HOME);     // ← ĐỔI: S2_NEUTRAL → S2_HOME
     servo2_busy      = false;
     servo2_returning = false;
-    if (!servo1_busy) {
-      digitalWrite(PIN_STATUS_LED, LOW);
-    }
+    if (!servo1_busy) digitalWrite(PIN_STATUS_LED, LOW);
   }
 }
 
@@ -296,8 +289,8 @@ void handle_command(const String& raw) {
   }
 
   else if (strcmp(cmd, "RESET") == 0) {
-    servo1.write(S1_NEUTRAL);
-    servo2.write(S2_NEUTRAL);
+    servo1.write(S1_HOME);
+    servo2.write(S2_HOME);
     servo1_busy      = false;
     servo2_busy      = false;
     servo1_returning = false;
@@ -353,28 +346,24 @@ void actuate_servo(uint8_t id, const char* direction) {
   bool&     ret_ref    = (id == 1) ? servo1_returning  : servo2_returning;
   uint32_t& ret_at_ref = (id == 1) ? servo1_return_at  : servo2_return_at;
 
+  int home_angle = (id == 1) ? S1_HOME : S2_HOME;
+  int fire_angle = (id == 1) ? S1_FIRE : S2_FIRE;
+
+  // ── ĐỔI LOGIC: chỉ có "fire" và mọi thứ khác về home ──────────────────
   int angle;
-  if (id == 1) {
-    if      (strcmp(direction, "left")  == 0) angle = S1_LEFT;
-    else if (strcmp(direction, "right") == 0) angle = S1_RIGHT;
-    else                                       angle = S1_NEUTRAL;
+  if (strcmp(direction, "fire") == 0) {
+    angle = fire_angle;
   } else {
-    if      (strcmp(direction, "left")  == 0) angle = S2_LEFT;
-    else if (strcmp(direction, "right") == 0) angle = S2_RIGHT;
-    else                                       angle = S2_NEUTRAL;
+    // "pass", "home", hay bất kỳ giá trị nào khác → về home
+    angle = home_angle;
   }
 
-  // Write target angle
   srv.write(angle);
   digitalWrite(PIN_STATUS_LED, HIGH);
 
-  // Schedule return to neutral — non-blocking
   busy_ref   = true;
   ret_ref    = true;
   ret_at_ref = millis() + SERVO_HOLD_MS;
-
-  // Return immediately.  check_servo_returns() will write neutral
-  // once SERVO_HOLD_MS ms have elapsed.
 }
 
 // ── Send an error message to Master ───────────────────────────────────────

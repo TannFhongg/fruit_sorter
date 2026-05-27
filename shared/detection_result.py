@@ -79,11 +79,10 @@ class FruitColor(str, Enum):
 
 
 class SortAction(str, Enum):
-    SERVO1_LEFT  = "SERVO1_LEFT"
-    SERVO1_RIGHT = "SERVO1_RIGHT"
-    SERVO2_LEFT  = "SERVO2_LEFT"
-    SERVO2_RIGHT = "SERVO2_RIGHT"
-    REJECT       = "REJECT"
+    SERVO1_FIRE    = "SERVO1_FIRE"
+    SERVO2_FIRE    = "SERVO2_FIRE"
+    PASS           = "PASS"
+    REJECT         = "REJECT"
 
 
 @dataclass

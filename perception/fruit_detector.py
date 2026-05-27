@@ -411,8 +411,13 @@ def _letterbox(
 
 def _resolve_action(route: dict) -> SortAction:
     servo     = route.get("servo")
-    direction = route.get("direction", "reject")
-    if servo is None or direction == "reject":
+    direction = route.get("direction", "pass")
+
+    if servo is None:
+        # RED và UNKNOWN: không kích servo
+        if direction == "pass":
+            return SortAction.PASS     # ← ĐỔI
         return SortAction.REJECT
-    key = f"SERVO{servo}_{direction.upper()}"
+
+    key = f"SERVO{servo}_FIRE"         # ← ĐỔI: không còn LEFT/RIGHT
     return SortAction[key] if key in SortAction.__members__ else SortAction.REJECT
