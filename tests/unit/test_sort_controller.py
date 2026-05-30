@@ -18,15 +18,27 @@ from shared.detection_result import DetectionResult, FruitColor, SortAction
 
 
 def _make_det(color: str, age_ms: float, action: SortAction) -> DetectionResult:
-    det = DetectionResult(
+    """Create a DetectionResult for testing with specified age.
+    
+    Args:
+        color: Fruit color (GREEN, RED, YELLOW, UNKNOWN)
+        age_ms: How old the detection should be (ms ago from now)
+        action: Sort action to assign
+    
+    Returns:
+        DetectionResult with timestamp set to (now - age_ms)
+    """
+    # Calculate timestamp: current time minus age
+    timestamp_ms = time.monotonic() * 1000 - age_ms
+    
+    return DetectionResult(
         fruit_color=FruitColor(color),
         confidence=0.92,
         action=action,
         frame_id=1,
         bbox=(0, 0, 100, 100),
+        timestamp_ms=timestamp_ms,  # ← Pass as constructor argument
     )
-    det.timestamp_ms = time.monotonic() * 1000 - age_ms
-    return det
 
 
 @pytest.fixture
@@ -96,16 +108,17 @@ class TestTimingGate:
 
     def test_too_early_blocked(self, controller):
         sc, q, _, _, serial = controller
-        q.append(_make_det("GREEN", 400, SortAction.SERVO1_LEFT))  # 400 < 700
+        q.append(_make_det("GREEN", 400, SortAction.SERVO1_FIRE))  # 400 < 700
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
         assert len(q) == 1          # item NOT consumed
         serial.send.assert_not_called()
 
     def test_too_late_blocked(self, controller):
         sc, q, _, _, serial = controller
-        q.append(_make_det("GREEN", 1200, SortAction.SERVO1_LEFT))  # 1200 > 1000
+        q.append(_make_det("GREEN", 1200, SortAction.SERVO1_FIRE))  # 1200 > 1000
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
-        assert len(q) == 1
+        # Item should be dropped (too late for IR1, first sensor)
+        assert len(q) == 0  # item consumed and dropped
         serial.send.assert_not_called()
 
 
