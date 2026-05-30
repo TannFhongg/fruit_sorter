@@ -125,11 +125,18 @@ class _CaptureThread(threading.Thread):
         self.drop_count  = 0
 
     def get_latest(self) -> Optional[tuple[int, np.ndarray, float]]:
-        """Returns (frame_id, frame, capture_timestamp_ms) or None"""
+        """Returns (frame_id, frame, capture_timestamp_ms) or None
+        
+        CRITICAL: frame_count must be read inside the same lock that guards
+        buffer to ensure consistency. If frame_count is incremented outside
+        the lock, there's a race window where get_latest() could read
+        frame_count=N but buffer contains frame N+1.
+        """
         with self._lock:
             if not self.buffer:
                 return None
             frame, capture_ts = self.buffer[-1]
+            # Read frame_count inside lock for consistency
             return (self.frame_count, frame, capture_ts)
 
     def run(self) -> None:
@@ -141,11 +148,25 @@ class _CaptureThread(threading.Thread):
                 continue
             # ── CRITICAL: Timestamp captured HERE, not after inference ──
             capture_ts_ms = time.monotonic() * 1000
+            
+            # ── CRITICAL: Increment frame_count INSIDE lock ───────────────
+            # frame_count must be incremented atomically with buffer.append()
+            # to prevent race condition in get_latest().
+            #
+            # Race scenario if frame_count is outside lock:
+            #   Thread A (run):     append frame N to buffer
+            #   Thread B (get_latest): read frame_count = N-1, get frame N
+            #   Thread A (run):     frame_count = N
+            #   → get_latest() returns (N-1, frame_N) → ID mismatch
+            #
+            # Fix: increment inside lock ensures frame_count always matches
+            # the number of frames that have been appended to buffer.
+            
             with self._lock:
                 if len(self.buffer) == self.buffer.maxlen:
                     self.drop_count += 1
                 self.buffer.append((frame, capture_ts_ms))
-            self.frame_count += 1
+                self.frame_count += 1  # ← Moved inside lock
         log.info(
             "CaptureThread stopped | captured=%d dropped=%d",
             self.frame_count, self.drop_count,

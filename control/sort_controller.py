@@ -177,7 +177,45 @@ class SortController(threading.Thread):
             item = self._queue.popleft()
         # ── Lock released here; `item` is now thread-local ────────────────
 
+        # ── Validate sensor-servo mapping ──────────────────────────────────
+        # CRITICAL: Ensure the IR sensor that triggered matches the expected
+        # servo position for this fruit.
+        #
+        # Physical layout assumption:
+        #   IR1 → SERVO1 (station 1, e.g., GREEN)
+        #   IR2 → SERVO2 (station 2, e.g., YELLOW)
+        #
+        # If IR2 triggers but item.action is SERVO1_FIRE, the fruit is at
+        # the wrong position — it should have been sorted at IR1 but wasn't.
+        # Sorting it now at IR2 would fire SERVO1 too late (fruit already
+        # passed the servo).
+        #
+        # Solution: Validate sensor_id matches expected servo_id from action.
+        # If mismatch, log error and treat as missed fruit.
+        
+        expected_servo_id = self._get_expected_servo(item)
+        
+        if expected_servo_id is not None and expected_servo_id != sensor_id:
+            log.error(
+                "IR%d: Sensor-servo mismatch! %s expects SERVO%d but triggered at IR%d. "
+                "Fruit missed correct sorting position. Dropping.",
+                sensor_id, item.fruit_color.value, expected_servo_id, sensor_id
+            )
+            # Do not dispatch - fruit is at wrong position
+            return
+        
         self._dispatch(sensor_id, item)
+    
+    def _get_expected_servo(self, item: DetectionResult) -> int | None:
+        """Extract expected servo ID from item action.
+        Returns None for PASS/REJECT actions (no servo needed)."""
+        if item.action in (SortAction.PASS, SortAction.REJECT):
+            return None
+        
+        # Extract servo ID from action (e.g., "SERVO1_FIRE" → 1)
+        parts = item.action.value.split("_")
+        servo_id = int(parts[0].replace("SERVO", ""))
+        return servo_id
 
     # ── Dispatch ───────────────────────────────────────────────────────────
     #

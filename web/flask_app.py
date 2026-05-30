@@ -310,11 +310,10 @@ def create_flask_app(
                     old_rejects = _live["rejects"]
                     
                     # Reset all counters
+                    # _live is defaultdict(int), so after clear(), any key
+                    # access automatically returns 0. No need to explicitly
+                    # set each key to 0.
                     _live.clear()
-                    _live["GREEN"] = 0
-                    _live["RED"] = 0
-                    _live["YELLOW"] = 0
-                    _live["rejects"] = 0
                     
                     log.info(
                         "Midnight reset: %s → %s | Previous day totals: "
