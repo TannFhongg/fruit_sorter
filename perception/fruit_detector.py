@@ -363,8 +363,28 @@ class FruitDetector(threading.Thread):
         W, H = self._input_wh
         blob_img, (px, py, sc) = _letterbox(frame, W, H)
 
+        # ── CRITICAL: Color space conversion ──────────────────────────────
+        # OpenCV reads camera frames in BGR format (Blue-Green-Red).
+        # YOLO models are trained on RGB images (Red-Green-Blue).
+        # 
+        # WRONG (current bug):
+        #   ncnn.Mat.from_pixels(..., PIXEL_BGR, ...)
+        #   → Feeds BGR directly to model
+        #   → Model sees Red as Blue, Blue as Red
+        #   → Red apple appears as dark blue/purple to the model
+        #   → Color classification completely fails
+        #
+        # CORRECT:
+        #   ncnn.Mat.from_pixels(..., PIXEL_BGR2RGB, ...)
+        #   → NCNN automatically swaps B and R channels
+        #   → Model receives correct RGB input
+        #   → Color classification works as trained
+        #
+        # This MUST match the preprocessing in tools/test_model.py, which
+        # correctly uses cv2.cvtColor(img, cv2.COLOR_BGR2RGB) before inference.
+
         mat_in = ncnn.Mat.from_pixels(
-            blob_img, ncnn.Mat.PixelType.PIXEL_BGR, W, H
+            blob_img, ncnn.Mat.PixelType.PIXEL_BGR2RGB, W, H
         )
         mat_in.substract_mean_normalize([0.0, 0.0, 0.0], [1 / 255.0] * 3)
 
