@@ -1,7 +1,7 @@
 /*
  * arduino_firmware/arduino_firmware.ino
  * =====================================================================
- * FruitSorter — Arduino Slave Firmware
+ * FruitSorter — Arduino Slave Firmware  v3.0 (SWEEP mechanism)
  * =====================================================================
  * Role   : Slave — receives commands from the Raspberry Pi (Master)
  *          via UART Serial.
@@ -10,137 +10,118 @@
  *   1. Read 2× IR sensors using hardware interrupts (pins 2, 3)
  *   2. Send IR_TRIGGER events to Master as soon as a sensor fires
  *   3. Receive SORT commands from Master → actuate the correct servo
+ *      using SWEEP (0° → 120° fast sweep to deflect fruit sideways)
  *   4. Reply PONG to PING (heartbeat watchdog)
  *   5. Report STATUS on demand
  *
  * Protocol: JSON one-liner + '\n' @ 115200 baud
  *
- * Libraries required (Arduino IDE → Library Manager):
- *   - ArduinoJson  (by Benoit Blanchon)  ← mandatory
- *   - Servo        (built-in)
+ * =====================================================================
+ * SWEEP mechanism (v3.0)
+ * =====================================================================
+ * PREVIOUS design ("push"): servo held a fixed angle and waited for
+ * fruit to fall/slide off. Timing-sensitive, position-dependent.
  *
- * Pin layout (matches hardware_config.yaml):
- *   IR Sensor 1 → Digital Pin 2  (INT0, FALLING)
- *   IR Sensor 2 → Digital Pin 3  (INT1, FALLING)
- *   Servo 1     → PWM Pin 9
- *   Servo 2     → PWM Pin 10
- *   Status LED  → Pin 13 (built-in)
+ * NEW design ("sweep" / flap):
+ *   1. Flap rests at 0° (parallel to conveyor — no obstruction).
+ *   2. On SORT command: servo sweeps 0° → SWEEP_ANGLE (120°) in
+ *      SWEEP_DURATION_MS (~200 ms). The EDGE of the flap "slaps"
+ *      the fruit sideways as it passes through the station.
+ *   3. After sweep completes, servo returns to 0° (home) at a
+ *      slightly slower pace (RETURN_DURATION_MS ~300 ms) to avoid
+ *      hitting any fruit still on the belt.
+ *
+ * Why MG996R works well here:
+ *   - Stall torque 9–11 kg·cm @ 6V → ample force for a fast sweep
+ *   - No-load speed ~0.14 s/60° @ 6V → 120° sweep in ~280 ms max
+ *   - Software-timed sweep is accurate enough (±10 ms on AVR timer)
+ *
+ * SMOOTH SWEEP via intermediate positions:
+ *   Standard Servo.write() gives a step function — instant jump.
+ *   For the sweep to "hit" the fruit at maximum angular velocity,
+ *   we WANT a fast sweep, so we rely on the servo's own slew rate.
+ *   We write the target angle immediately; the servo accelerates
+ *   on its own. No intermediate positions needed.
+ *
+ *   Sequence (non-blocking, managed by check_servo_state()):
+ *     Phase IDLE    : servo at HOME (0°)
+ *     Phase SWEEPING: Servo.write(SWEEP_ANGLE) issued; wait SWEEP_DURATION_MS
+ *     Phase RETURNING: Servo.write(HOME) issued; wait RETURN_DURATION_MS
+ *     → back to IDLE
  *
  * =====================================================================
- * ISR-safety fix (Issue #2)
+ * ISR-safety (unchanged from v2)
  * =====================================================================
- * ISRs only set a volatile flag — no millis(), no Serial.
+ * ISRs only set a volatile bool flag — no millis(), no Serial.
  * Debounce and event emission both live in loop().
- * See original comments for full rationale.
  *
  * =====================================================================
- * Bug fix — Non-blocking servo actuation
+ * Non-blocking timing (unchanged from v2, extended for sweep phases)
  * =====================================================================
- * PROBLEM: The previous firmware called delay(SERVO_HOLD_MS) inside
- * actuate_servo(), which is invoked from loop():
+ * Uses millis() - start_ms >= duration pattern (overflow-safe).
+ * Two phases per servo instead of one:
+ *   Phase 1: SWEEPING  (duration = SWEEP_DURATION_MS)
+ *   Phase 2: RETURNING (duration = RETURN_DURATION_MS)
  *
- *   void actuate_servo(...) {
- *       srv.write(angle);
- *       delay(SERVO_HOLD_MS);   // ← busy-wait, blocks ALL of loop()
- *       srv.write(neutral);
- *   }
- *
- * delay() is a busy-wait on AVR — it spins until the timer counter
- * reaches the target value.  While spinning, loop() cannot run.
- * Hardware interrupts still fire (ISRs execute), so ir1_pending /
- * ir2_pending get set correctly — but because loop() is blocked,
- * those flags are never read, debounced, or forwarded to the Master
- * until delay() returns.
- *
- * Real-world impact: conveyor at 0.3 m/s, fruit spacing 15 cm →
- * inter-fruit interval ≈ 500 ms = SERVO_HOLD_MS.  Any IR event that
- * fires while the servo is holding its angle is silently dropped.
- * The Master never sees the trigger, so the second fruit is never
- * sorted.
- *
- * FIXED PATTERN — software timer (non-blocking):
- *
- *   actuate_servo() now:
- *     1. Writes the target angle to the servo.
- *     2. Records the scheduled return time:
- *          servo_return_at = millis() + SERVO_HOLD_MS
- *     3. Sets a servo_returning flag.
- *     4. Returns immediately — does NOT block.
- *
- *   check_servo_returns(), called at the TOP of every loop() iteration:
- *     1. Reads millis().
- *     2. For each servo: if returning && now >= return_at → write neutral.
- *     3. Clears the returning flag and busy flag.
- *
- * This keeps loop() running continuously regardless of servo state.
- * IR events are processed within one loop() iteration (< 1 ms) even
- * while a servo is holding its sort position.
- *
- * SORT_DONE response change:
- *   Because actuate_servo() now returns before the hold completes, we
- *   cannot measure the actual hold duration with millis() anymore.
- *   The SORT_DONE ACK is sent immediately with the *nominal* hold time
- *   (SERVO_HOLD_MS constant) instead of a measured value.  The Master
- *   already treats SORT_DONE as "command accepted", not "servo returned
- *   to neutral", so this semantic change is compatible.
  * =====================================================================
  */
 
 #include <Servo.h>
 #include <ArduinoJson.h>
 
-// ── Pin definitions (sync with hardware_config.yaml) ─────────────────────
+// ── Pin definitions ───────────────────────────────────────────────────────
 #define PIN_IR1         2
 #define PIN_IR2         3
 #define PIN_SERVO1      9
 #define PIN_SERVO2      10
 #define PIN_STATUS_LED  13
 
-// ── Servo angles (sync with hardware_config.yaml) ─────────────────────────
-#define S1_HOME         0
-#define S1_FIRE         90
-#define S2_HOME         0
-#define S2_FIRE         90
-#define SERVO_HOLD_MS 150
+// ── Servo angles ──────────────────────────────────────────────────────────
+#define SERVO_HOME          0     // resting position — parallel to belt
+#define SERVO_SWEEP_ANGLE   120   // maximum sweep angle (degrees)
 
 // ── Timing ────────────────────────────────────────────────────────────────
-#define DEBOUNCE_MS     20   // minimum ms between two valid triggers
-#define SERIAL_BAUD  115200
+// SWEEP_DURATION_MS: time to hold the swept position.
+//   MG996R @ 6V moves 60° in ~0.14s → 120° in ~0.28s.
+//   We command the target angle and wait SWEEP_DURATION_MS before returning.
+//   200 ms gives the servo time to reach full angle and strike the fruit.
+#define SWEEP_DURATION_MS   200
 
-// ── ISR state — ONLY flags; no timestamps, no millis() calls ─────────────
+// RETURN_DURATION_MS: time to let the servo return to home before
+//   declaring the servo idle. Slightly longer to avoid back-striking.
+#define RETURN_DURATION_MS  300
+
+#define DEBOUNCE_MS         20    // minimum ms between two valid IR triggers
+#define SERIAL_BAUD      115200
+
+// ── Servo phase state ─────────────────────────────────────────────────────
+// Each servo cycles through: IDLE → SWEEPING → RETURNING → IDLE
+typedef enum {
+  PHASE_IDLE      = 0,
+  PHASE_SWEEPING  = 1,
+  PHASE_RETURNING = 2,
+} ServoPhase;
+
+// ── ISR state ─────────────────────────────────────────────────────────────
 volatile bool ir1_pending = false;
 volatile bool ir2_pending = false;
 
-// ── Debounce state — owned exclusively by loop() ──────────────────────────
+// ── Debounce state ────────────────────────────────────────────────────────
 uint32_t last_ir1_ms = 0;
 uint32_t last_ir2_ms = 0;
 
 // ── Servo state ───────────────────────────────────────────────────────────
 Servo    servo1, servo2;
 
-// busy flag: true while the servo is away from neutral (sorting or returning)
-bool     servo1_busy = false;
-bool     servo2_busy = false;
-
-// Non-blocking return timer state.
-// returning flag : true while the servo is holding its sort angle and
-//                  waiting to return to neutral.
-// start_ms       : the millis() value when the servo started moving.
-//                  Using start time + elapsed check (millis() - start_ms >= duration)
-//                  is overflow-safe, unlike (millis() >= target_time).
-bool     servo1_returning = false;
-bool     servo2_returning = false;
-uint32_t servo1_start_ms = 0;
-uint32_t servo2_start_ms = 0;
+ServoPhase servo1_phase    = PHASE_IDLE;
+ServoPhase servo2_phase    = PHASE_IDLE;
+uint32_t   servo1_phase_start_ms = 0;
+uint32_t   servo2_phase_start_ms = 0;
 
 // ── Other state ───────────────────────────────────────────────────────────
 uint32_t boot_ms = 0;
 
-// ── Serial buffer — static allocation to prevent heap fragmentation ───────
-// AVR has only 2KB RAM and no garbage collector. Using String (dynamic
-// allocation) in a high-frequency loop causes memory fragmentation and
-// eventual crash after 1-2 hours of operation.
-// Static buffer eliminates malloc/free cycles entirely.
+// ── Serial buffer ─────────────────────────────────────────────────────────
 char     serial_buffer[128];
 uint8_t  serial_buf_index = 0;
 
@@ -155,8 +136,8 @@ void setup() {
 
   servo1.attach(PIN_SERVO1);
   servo2.attach(PIN_SERVO2);
-  servo1.write(S1_HOME);
-  servo2.write(S2_HOME);
+  servo1.write(SERVO_HOME);
+  servo2.write(SERVO_HOME);
 
   pinMode(PIN_IR1, INPUT_PULLUP);
   pinMode(PIN_IR2, INPUT_PULLUP);
@@ -170,7 +151,7 @@ void setup() {
 
   StaticJsonDocument<64> doc;
   doc["boot"]     = "ok";
-  doc["firmware"] = "FruitSorter-v2.2";
+  doc["firmware"] = "FruitSorter-v3.0-sweep";
   serializeJson(doc, Serial);
   Serial.println();
 
@@ -181,66 +162,76 @@ void setup() {
   }
 }
 
-// ── Non-blocking servo return checker ─────────────────────────────────────
+// ── Non-blocking servo state machine ──────────────────────────────────────
 //
-// Called at the TOP of every loop() iteration — O(1), always fast.
-// Checks whether either servo has held its sort angle long enough and
-// needs to return to neutral.
+// Called at the TOP of every loop() iteration.
 //
-// This replaces the blocking delay(SERVO_HOLD_MS) that was inside
-// actuate_servo().  Because this runs on every loop() pass, the servo
-// returns to neutral within 1 loop iteration (< 1 ms) of the deadline,
-// which is far more accurate than a busy-wait delay() and — crucially —
-// does not block IR event processing.
+// SWEEP state machine per servo:
 //
-// OVERFLOW-SAFE TIMING:
-//   Uses (millis() - start_ms >= duration) instead of (millis() >= target).
-//   This pattern is safe across millis() overflow (49.7 days).
-//   
-//   Why: uint32_t subtraction wraps correctly due to modular arithmetic.
-//   Example at overflow boundary:
-//     start_ms = 0xFFFFFFF0 (16ms before overflow)
-//     After 200ms: millis() = 0x000000B8 (184ms after overflow)
-//     millis() - start_ms = 0x000000B8 - 0xFFFFFFF0 = 0x000000C8 = 200ms ✓
+//   IDLE:
+//     Servo is at HOME. Waiting for actuate_servo() to start a sweep.
 //
-//   The (millis() >= target) pattern FAILS at overflow:
-//     target = 0xFFFFFFF0 + 150 = 0x00000082 (wrapped)
-//     millis() = 0x00000082
-//     0x00000082 >= 0x00000082 → true (correct by luck)
-//     BUT if checked at millis() = 0x00000050:
-//     0x00000050 >= 0x00000082 → false (WRONG! Should be true)
+//   SWEEPING:
+//     servo.write(SWEEP_ANGLE) was issued.
+//     Servo is physically moving toward SWEEP_ANGLE (the MG996R slews
+//     at its maximum rate — we don't need to drive it incrementally).
+//     After SWEEP_DURATION_MS, transition to RETURNING.
+//
+//   RETURNING:
+//     servo.write(HOME) was issued.
+//     Servo is physically returning to 0°.
+//     After RETURN_DURATION_MS, transition to IDLE.
+//     LED is turned off when BOTH servos are IDLE.
+//
+// Overflow-safe timing: (millis() - start_ms) >= duration
 
-void check_servo_returns() {
+void check_servo_state() {
   uint32_t now = millis();
 
-  if (servo1_returning && ((now - servo1_start_ms) >= SERVO_HOLD_MS)) {
-    servo1.write(S1_HOME);
-    servo1_busy      = false;
-    servo1_returning = false;
-    if (!servo2_busy) digitalWrite(PIN_STATUS_LED, LOW);
+  // ── Servo 1 ─────────────────────────────────────────────────────
+  if (servo1_phase == PHASE_SWEEPING) {
+    if ((now - servo1_phase_start_ms) >= SWEEP_DURATION_MS) {
+      // Sweep complete → command return to home
+      servo1.write(SERVO_HOME);
+      servo1_phase          = PHASE_RETURNING;
+      servo1_phase_start_ms = now;  // start return timer
+    }
+  }
+  else if (servo1_phase == PHASE_RETURNING) {
+    if ((now - servo1_phase_start_ms) >= RETURN_DURATION_MS) {
+      servo1_phase = PHASE_IDLE;
+      if (servo2_phase == PHASE_IDLE) {
+        digitalWrite(PIN_STATUS_LED, LOW);  // both idle → LED off
+      }
+    }
   }
 
-  if (servo2_returning && ((now - servo2_start_ms) >= SERVO_HOLD_MS)) {
-    servo2.write(S2_HOME);
-    servo2_busy      = false;
-    servo2_returning = false;
-    if (!servo1_busy) digitalWrite(PIN_STATUS_LED, LOW);
+  // ── Servo 2 ─────────────────────────────────────────────────────
+  if (servo2_phase == PHASE_SWEEPING) {
+    if ((now - servo2_phase_start_ms) >= SWEEP_DURATION_MS) {
+      servo2.write(SERVO_HOME);
+      servo2_phase          = PHASE_RETURNING;
+      servo2_phase_start_ms = now;
+    }
+  }
+  else if (servo2_phase == PHASE_RETURNING) {
+    if ((now - servo2_phase_start_ms) >= RETURN_DURATION_MS) {
+      servo2_phase = PHASE_IDLE;
+      if (servo1_phase == PHASE_IDLE) {
+        digitalWrite(PIN_STATUS_LED, LOW);
+      }
+    }
   }
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────
-//
-// Interrupts are ENABLED here, so millis() is safe to call.
-// check_servo_returns() runs first every iteration so return timing is
-// as accurate as possible regardless of Serial or IR processing time.
-
 void loop() {
-  // ── 1. Service servo return timers (non-blocking) ─────────────────
-  check_servo_returns();
+  // ── 1. Service servo state machine ────────────────────────────────
+  check_servo_state();
 
-  // ── 2. Process IR1 ───────────────────────────────────────────────
+  // ── 2. Process IR1 ────────────────────────────────────────────────
   if (ir1_pending) {
-    ir1_pending = false;                      // clear BEFORE reading millis()
+    ir1_pending = false;
     uint32_t now = millis();
     if (now - last_ir1_ms >= DEBOUNCE_MS) {
       last_ir1_ms = now;
@@ -248,7 +239,7 @@ void loop() {
     }
   }
 
-  // ── 3. Process IR2 ───────────────────────────────────────────────
+  // ── 3. Process IR2 ────────────────────────────────────────────────
   if (ir2_pending) {
     ir2_pending = false;
     uint32_t now = millis();
@@ -258,38 +249,22 @@ void loop() {
     }
   }
 
-  // ── 4. Process incoming Serial commands ──────────────────────────
-  //
-  // CRITICAL: Use static buffer instead of String to prevent heap
-  // fragmentation. String uses malloc/free on every readStringUntil(),
-  // which fragments the 2KB AVR heap and causes crashes after 1-2 hours.
-  //
-  // Static buffer approach:
-  //   - Read one char at a time
-  //   - Accumulate in fixed-size buffer
-  //   - Process on '\n', then reset index
-  //   - No dynamic allocation, no fragmentation
-  
+  // ── 4. Process incoming Serial commands ───────────────────────────
   while (Serial.available() > 0) {
     char c = Serial.read();
-    
     if (c == '\n' || c == '\r') {
-      // End of command — process if buffer has content
       if (serial_buf_index > 0) {
-        serial_buffer[serial_buf_index] = '\0';  // Null-terminate
+        serial_buffer[serial_buf_index] = '\0';
         handle_command(serial_buffer);
-        serial_buf_index = 0;  // Reset for next command
+        serial_buf_index = 0;
       }
     }
     else if (serial_buf_index < sizeof(serial_buffer) - 1) {
-      // Accumulate character if buffer not full
       serial_buffer[serial_buf_index++] = c;
     }
     else {
-      // Buffer overflow — discard and reset
       send_error("cmd_too_long");
       serial_buf_index = 0;
-      // Flush remaining chars until newline
       while (Serial.available() > 0 && Serial.read() != '\n') { ; }
     }
   }
@@ -305,32 +280,26 @@ void send_ir_trigger(uint8_t sensor_id, uint32_t ts) {
   Serial.println();
 }
 
-// ── Parse and dispatch a command received from Master ─────────────────────
-// Now accepts const char* instead of String to avoid dynamic allocation
+// ── Parse and dispatch a command from Master ──────────────────────────────
 void handle_command(const char* raw) {
   StaticJsonDocument<128> doc;
   DeserializationError err = deserializeJson(doc, raw);
-
-  if (err) {
-    send_error("json_parse_fail");
-    return;
-  }
+  if (err) { send_error("json_parse_fail"); return; }
 
   const char* cmd = doc["cmd"] | "";
 
   if (strcmp(cmd, "SORT") == 0) {
     uint8_t     servo_id  = doc["servo"]  | 0;
-    const char* direction = doc["dir"]    | "neutral";
+    const char* direction = doc["dir"]    | "home";
 
-    // actuate_servo() now returns immediately (non-blocking).
-    // We report the *nominal* hold time instead of measuring it,
-    // because the actual return happens asynchronously in loop().
     actuate_servo(servo_id, direction);
 
-    StaticJsonDocument<80> resp;
-    resp["ack"]   = "SORT_DONE";
-    resp["servo"] = servo_id;
-    resp["ms"]    = SERVO_HOLD_MS;   // nominal — actual return is async
+    // ACK immediately — actual sweep runs asynchronously in loop().
+    // total_ms = SWEEP_DURATION_MS + RETURN_DURATION_MS (for caller info)
+    StaticJsonDocument<96> resp;
+    resp["ack"]      = "SORT_DONE";
+    resp["servo"]    = servo_id;
+    resp["total_ms"] = SWEEP_DURATION_MS + RETURN_DURATION_MS;
     serializeJson(resp, Serial);
     Serial.println();
   }
@@ -344,36 +313,51 @@ void handle_command(const char* raw) {
   }
 
   else if (strcmp(cmd, "RESET") == 0) {
-    servo1.write(S1_HOME);
-    servo2.write(S2_HOME);
-    servo1_busy      = false;
-    servo2_busy      = false;
-    servo1_returning = false;
-    servo2_returning = false;
+    servo1.write(SERVO_HOME);
+    servo2.write(SERVO_HOME);
+    servo1_phase = PHASE_IDLE;
+    servo2_phase = PHASE_IDLE;
     digitalWrite(PIN_STATUS_LED, LOW);
     Serial.println("{\"ack\":\"RESET_DONE\"}");
   }
 
   else if (strcmp(cmd, "STATUS") == 0) {
+    // Compute remaining time in current phase (overflow-safe)
+    uint32_t now = millis();
+
+    int32_t s1_remaining_ms = 0;
+    if (servo1_phase == PHASE_SWEEPING) {
+      uint32_t elapsed = now - servo1_phase_start_ms;
+      s1_remaining_ms  = (int32_t)SWEEP_DURATION_MS - (int32_t)elapsed
+                        + (int32_t)RETURN_DURATION_MS;
+    } else if (servo1_phase == PHASE_RETURNING) {
+      uint32_t elapsed = now - servo1_phase_start_ms;
+      s1_remaining_ms  = (int32_t)RETURN_DURATION_MS - (int32_t)elapsed;
+    }
+
+    int32_t s2_remaining_ms = 0;
+    if (servo2_phase == PHASE_SWEEPING) {
+      uint32_t elapsed = now - servo2_phase_start_ms;
+      s2_remaining_ms  = (int32_t)SWEEP_DURATION_MS - (int32_t)elapsed
+                        + (int32_t)RETURN_DURATION_MS;
+    } else if (servo2_phase == PHASE_RETURNING) {
+      uint32_t elapsed = now - servo2_phase_start_ms;
+      s2_remaining_ms  = (int32_t)RETURN_DURATION_MS - (int32_t)elapsed;
+    }
+
     StaticJsonDocument<256> resp;
     resp["ack"]            = "STATUS";
     resp["servo1_ok"]      = servo1.attached();
     resp["servo2_ok"]      = servo2.attached();
-    resp["servo1_busy"]    = servo1_busy;
-    resp["servo2_busy"]    = servo2_busy;
-    // Calculate remaining time using overflow-safe subtraction
-    resp["servo1_ret_ms"]  = servo1_returning
-                               ? (int32_t)(SERVO_HOLD_MS - (millis() - servo1_start_ms))
-                               : 0;
-    resp["servo2_ret_ms"]  = servo2_returning
-                               ? (int32_t)(SERVO_HOLD_MS - (millis() - servo2_start_ms))
-                               : 0;
+    resp["servo1_phase"]   = (int)servo1_phase;   // 0=IDLE,1=SWEEPING,2=RETURNING
+    resp["servo2_phase"]   = (int)servo2_phase;
+    resp["servo1_rem_ms"]  = max(0, s1_remaining_ms);
+    resp["servo2_rem_ms"]  = max(0, s2_remaining_ms);
     resp["ir1_pin"]        = digitalRead(PIN_IR1);
     resp["ir2_pin"]        = digitalRead(PIN_IR2);
     resp["uptime_s"]       = (millis() - boot_ms) / 1000UL;
     serializeJson(resp, Serial);
     Serial.println();
-
   }
 
   else {
@@ -381,53 +365,47 @@ void handle_command(const char* raw) {
   }
 }
 
-// ── Actuate a servo — NON-BLOCKING ────────────────────────────────────────
+// ── Actuate a servo — NON-BLOCKING SWEEP ─────────────────────────────────
 //
-// Writes the target angle and schedules the return to neutral via a
-// software timer.  Returns immediately — does NOT call delay().
+// "fire" direction:
+//   Immediately write SWEEP_ANGLE to the servo.
+//   The MG996R will physically slew from 0° to 120° at full speed
+//   (approx 0.14 s/60° → reaches 120° in ~280 ms).
+//   check_servo_state() monitors SWEEP_DURATION_MS (200 ms) then
+//   commands the return. The 200 ms window is chosen so the flap
+//   strikes the fruit as it passes through the station.
 //
-// The actual return to neutral is performed by check_servo_returns()
-// on the next loop() iteration after (millis() - start_ms) >= SERVO_HOLD_MS.
+// "home" / any other direction:
+//   Immediately write HOME angle. Useful for RESET commands.
 //
-// OVERFLOW-SAFE TIMING:
-//   Records start_ms instead of calculating return_at = millis() + duration.
-//   This makes the elapsed time check (millis() - start_ms >= duration)
-//   safe across millis() overflow at 49.7 days.
-//
-// Concurrency note: if a second SORT command arrives for the same servo
-// while it is still holding its sort angle (servo_busy == true), the
-// new command overwrites the angle and resets the start timer.  This
-// is safe because all state writes happen in loop() with interrupts
-// enabled but Serial reads are sequential — two SORT commands cannot
-// be processed simultaneously on a single-core AVR.
+// Concurrency note: if a second SORT arrives while servo is already
+//   sweeping/returning, we restart the sweep phase. This is safe on
+//   single-core AVR because Serial commands are processed sequentially.
 
 void actuate_servo(uint8_t id, const char* direction) {
-  Servo&    srv        = (id == 1) ? servo1    : servo2;
-  bool&     busy_ref   = (id == 1) ? servo1_busy      : servo2_busy;
-  bool&     ret_ref    = (id == 1) ? servo1_returning  : servo2_returning;
-  uint32_t& start_ref  = (id == 1) ? servo1_start_ms   : servo2_start_ms;
+  Servo&      srv        = (id == 1) ? servo1          : servo2;
+  ServoPhase& phase_ref  = (id == 1) ? servo1_phase    : servo2_phase;
+  uint32_t&   start_ref  = (id == 1) ? servo1_phase_start_ms : servo2_phase_start_ms;
 
-  int home_angle = (id == 1) ? S1_HOME : S2_HOME;
-  int fire_angle = (id == 1) ? S1_FIRE : S2_FIRE;
-
-  // ── ĐỔI LOGIC: chỉ có "fire" và mọi thứ khác về home ──────────────────
-  int angle;
   if (strcmp(direction, "fire") == 0) {
-    angle = fire_angle;
+    // Command the full sweep angle immediately.
+    // MG996R will reach 120° under its own speed profile.
+    srv.write(SERVO_SWEEP_ANGLE);
+    digitalWrite(PIN_STATUS_LED, HIGH);
+    phase_ref = PHASE_SWEEPING;
+    start_ref = millis();
   } else {
-    // "pass", "home", hay bất kỳ giá trị nào khác → về home
-    angle = home_angle;
+    // "home" or any other value → return to rest immediately
+    srv.write(SERVO_HOME);
+    phase_ref = PHASE_IDLE;
+    if ((id == 1 && servo2_phase == PHASE_IDLE) ||
+        (id == 2 && servo1_phase == PHASE_IDLE)) {
+      digitalWrite(PIN_STATUS_LED, LOW);
+    }
   }
-
-  srv.write(angle);
-  digitalWrite(PIN_STATUS_LED, HIGH);
-
-  busy_ref   = true;
-  ret_ref    = true;
-  start_ref  = millis();  // Record start time, not target time
 }
 
-// ── Send an error message to Master ───────────────────────────────────────
+// ── Send error message to Master ──────────────────────────────────────────
 void send_error(const char* msg) {
   StaticJsonDocument<64> doc;
   doc["ack"] = "ERROR";

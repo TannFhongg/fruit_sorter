@@ -8,7 +8,7 @@
 # SYSTEM
 # ---------------------------------------------------------------------------
 system:
-  name: "FruitSorter v2.0"
+  name: "FruitSorter v3.0"
   mode: "production"        # "production" | "debug" | "simulation"
   log_level: "INFO"
   log_file: "logs/sorter.log"
@@ -61,22 +61,39 @@ hardware:
       debounce_ms: 20
     ir2:
       pin: 3                 # Arduino digital pin 3 (interrupt)
-      label: "station_yellow"     # Vị trí trước servo 2
+      label: "station_yellow"    # Vị trí trước servo 2
       debounce_ms: 20
 
   servos:
+    # -----------------------------------------------------------------------
+    # SWEEP mechanism (v3.0) — MG996R
+    # -----------------------------------------------------------------------
+    # angle_home  : resting position (parallel to belt — no obstruction)
+    # angle_sweep : maximum sweep angle; flap "slaps" fruit sideways
+    #
+    # Physical sequence:
+    #   1. Flap at angle_home (0°) — fruit passes freely
+    #   2. SORT command arrives → servo sweeps to angle_sweep (120°)
+    #      in ~200 ms (MG996R no-load speed: ~0.14 s/60° @ 6V)
+    #   3. Flap edge strikes fruit mid-sweep, deflects it off belt
+    #   4. After sweep_duration_ms, servo returns to angle_home
+    #      (return_duration_ms gives time for flap to clear the belt)
+    # -----------------------------------------------------------------------
     servo1:
       pin: 9                 # Arduino PWM pin 9
-      label: "pusher_green"
-      angle_home: 0
-      angle_fire: 90
-      hold_ms: 150
+      label: "flap_green"
+      angle_home: 0          # resting — parallel to belt
+      angle_sweep: 120       # sweep angle — strikes fruit sideways
+      sweep_duration_ms: 200 # time to hold swept position (ms)
+      return_duration_ms: 300 # time for return stroke before idle (ms)
+
     servo2:
       pin: 10                # Arduino PWM pin 10
-      label: "pusher_yellow"
+      label: "flap_yellow"
       angle_home: 0
-      angle_fire: 90 
-      hold_ms: 150
+      angle_sweep: 120
+      sweep_duration_ms: 200
+      return_duration_ms: 300
 
 # ---------------------------------------------------------------------------
 # CONVEYOR — băng chuyền
@@ -100,27 +117,24 @@ model:
   type: "ncnn"
   input_size: [320, 320]
   num_threads: 4
-  frame_skip: 3   
-  use_gpu: false              # ← THÊM DÒNG NÀY — RPi4 không có Vulkan   
+  frame_skip: 3
+  use_gpu: false
 
   thresholds:
-    confidence: 0.65         # Bỏ detection dưới ngưỡng này
-    iou_nms: 0.45            # NMS overlap threshold
-    min_bbox_area: 1500      # px² — lọc nhiễu bbox quá nhỏ
+    confidence: 0.65
+    iou_nms: 0.45
+    min_bbox_area: 1500
 
-  # Nhãn lớp — thứ tự PHẢI khớp với model đã train
   labels:
     0: "GREEN"
     1: "RED"
     2: "YELLOW"
 
-  # Màu vẽ bbox debug (BGR)
   label_colors:
     GREEN:  [0, 200, 50]
     RED:    [0, 50, 220]
     YELLOW: [0, 210, 255]
 
-  # Mapping nhãn → servo action
   routing:
     GREEN:   { servo: 1, direction: "fire"  }
     RED:     { servo: null, direction: "pass"  }
@@ -146,7 +160,7 @@ database:
 # ---------------------------------------------------------------------------
 dashboard:
   push_interval_s: 1.0
-  max_log_entries: 200       # Số dòng tối đa hiển thị trong live log
+  max_log_entries: 200
 
 # ---------------------------------------------------------------------------
 # ALERTS

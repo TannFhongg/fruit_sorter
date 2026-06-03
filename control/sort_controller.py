@@ -1,3 +1,22 @@
+"""
+control/sort_controller.py
+==========================
+Thread 2 — nhận IR_TRIGGER từ Arduino Slave, khớp với DetectionResult
+trong queue theo cửa sổ thời gian, kích servo sweep tương ứng.
+
+v3.0 — SWEEP timing
+====================
+Với cơ chế quét (sweep), thời gian một chu kỳ servo là:
+  sweep_duration_ms (200) + return_duration_ms (300) = 500 ms tổng.
+
+Khi tính min_inter_fruit_interval (khoảng cách tối thiểu giữa 2 quả
+cùng trạm), cần đảm bảo quả tiếp theo không đến khi sweep vẫn đang
+chạy. Với belt 0.3 m/s và chu kỳ 500 ms → khoảng cách tối thiểu 15 cm.
+
+Timing window (cửa sổ thời gian hợp lệ) tính từ lúc camera detect
+đến lúc IR trigger: không thay đổi về công thức, chỉ phụ thuộc vào
+khoảng cách camera→IR và tốc độ belt.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +37,7 @@ class SortController(threading.Thread):
     """
     Thread 2 — receives IR_TRIGGER events from the Arduino Slave,
     matches each event to the oldest pending DetectionResult in the
-    shared detection queue, and actuates the correct servo.
+    shared detection queue, and triggers the correct servo sweep.
     """
 
     def __init__(
@@ -45,6 +64,19 @@ class SortController(threading.Thread):
             2: tuple(timing.get("ir2_window_ms", [1200, 1800])),
         }
 
+        # Total sweep cycle time per servo (sweep + return).
+        # Used for logging/diagnostics only — the Arduino manages its own timer.
+        srv_cfg = cfg.get("hardware", {}).get("servos", {})
+        s1 = srv_cfg.get("servo1", {})
+        self._sweep_cycle_ms = (
+            s1.get("sweep_duration_ms", 200) +
+            s1.get("return_duration_ms", 300)
+        )
+        log.info(
+            "SortController init | windows=%s | sweep_cycle=%d ms",
+            self._windows, self._sweep_cycle_ms,
+        )
+
     # ── Main loop ──────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -63,165 +95,114 @@ class SortController(threading.Thread):
 
     # ── IR trigger handler ─────────────────────────────────────────────────
     #
-    # KEY DESIGN (updated):
-    #   • `now_ms` is computed INSIDE the lock, immediately before reading
-    #     `candidate.timestamp_ms`.  This eliminates the stale-timestamp
-    #     race condition described in the module docstring.
-    #   • Lock is still released before calling _dispatch(), so servo
-    #     I/O never blocks queue access for other threads.
-    #   • The popped `item` is a local variable exclusively owned by this
-    #     thread from the moment the lock is released.
+    # KEY DESIGN:
+    #   • `now_ms` is computed INSIDE the lock — no preemption gap between
+    #     this value and candidate.timestamp_ms read below.
+    #   • Lock is released before calling _dispatch() — servo I/O never
+    #     blocks queue access for other threads.
+    #   • Popped `item` is exclusively owned by this thread.
 
     def _handle_ir_trigger(self, msg: dict) -> None:
         sensor_id = int(msg.get("sensor", 1))
         window    = self._windows.get(sensor_id, (0, 9999))
 
-        # ── Critical section: timestamp capture + inspect + (conditionally) pop
         item: DetectionResult | None = None
         with self._lock:
             if not self._queue:
                 log.warning("IR%d triggered — queue empty, ignoring", sensor_id)
                 return
 
-            # ↓ now_ms computed INSIDE the lock — no preemption gap between
-            #   this value and candidate.timestamp_ms read below.
-            now_ms    = time.monotonic() * 1000
-            
-            # ── PURGE expired detections to prevent queue deadlock ────────
-            # Remove all detections that are too old (beyond max window)
+            # now_ms inside lock → no stale-timestamp race
+            now_ms = time.monotonic() * 1000
+
+            # ── Purge expired detections ──────────────────────────────────
             max_window = max(w[1] for w in self._windows.values())
             purged_count = 0
             while self._queue:
                 candidate = self._queue[0]
                 delta_ms  = now_ms - candidate.timestamp_ms
-                
-                # If detection is too old (missed), remove it
                 if delta_ms > max_window:
                     expired = self._queue.popleft()
                     purged_count += 1
                     log.warning(
                         "Purged expired detection: %s (age=%.0fms > max_window=%.0fms)",
-                        expired.fruit_color.value, delta_ms, max_window
+                        expired.fruit_color.value, delta_ms, max_window,
                     )
                 else:
-                    break  # Found a valid candidate, stop purging
-            
+                    break
+
             if purged_count > 0:
                 log.info("Purged %d expired detection(s) from queue", purged_count)
-            
-            # After purging, check if queue is now empty
+
             if not self._queue:
-                log.warning("IR%d triggered — queue empty after purge, ignoring", sensor_id)
+                log.warning("IR%d triggered — queue empty after purge", sensor_id)
                 return
-            
-            # Get the next candidate after purging
+
             candidate = self._queue[0]
             delta_ms  = now_ms - candidate.timestamp_ms
 
-            # ── Check timing window for current sensor ────────────────────
+            # ── Timing window check ───────────────────────────────────────
             if not (window[0] <= delta_ms <= window[1]):
-                # Timing mismatch for this sensor.
-                # 
-                # CRITICAL: We must decide whether to:
-                #   A) Keep the item (it might match a future sensor)
-                #   B) Drop the item (it's too late for all sensors)
-                #
-                # Decision logic:
-                #   - If delta_ms < window[0]: item is too early for this sensor.
-                #     Keep it — might match this sensor on next trigger, or a
-                #     later sensor.
-                #   - If delta_ms > window[1]: item is too late for this sensor.
-                #     Check if it's also too late for ALL earlier sensors.
-                #     If yes, drop it (missed fruit).
-                
                 if delta_ms > window[1]:
-                    # Item is too late for current sensor.
-                    # Check if it's also too late for all earlier sensors.
-                    # If sensor_id == 1, this is the first sensor, so drop.
-                    # If sensor_id > 1, check if delta exceeds all earlier windows.
-                    
+                    # Too late — decide whether to drop
                     should_drop = False
-                    
                     if sensor_id == 1:
-                        # First sensor - if too late here, fruit is missed
                         should_drop = True
                     else:
-                        # Check if too late for all earlier sensors
-                        # Example: IR2 triggered, delta=2000ms
-                        # IR1 window is [700, 1000] → 2000 > 1000 → too late
                         all_earlier_missed = True
                         for sid in range(1, sensor_id):
                             earlier_window = self._windows.get(sid, (0, 9999))
                             if delta_ms <= earlier_window[1]:
-                                # Still within window of an earlier sensor
                                 all_earlier_missed = False
                                 break
                         should_drop = all_earlier_missed
-                    
+
                     if should_drop:
                         missed = self._queue.popleft()
                         log.warning(
-                            "IR%d: Dropping missed detection: %s (delta=%.0fms > window[1]=%.0fms)",
-                            sensor_id, missed.fruit_color.value, delta_ms, window[1]
+                            "IR%d: Dropping missed detection: %s "
+                            "(delta=%.0fms > window[1]=%.0fms)",
+                            sensor_id, missed.fruit_color.value,
+                            delta_ms, window[1],
                         )
                         return
-                
-                # Item is too early, or too late but might match earlier sensor
+
                 log.warning(
-                    "IR%d timing mismatch: delta=%.0fms, expected %.0f–%.0fms (keeping in queue)",
+                    "IR%d timing mismatch: delta=%.0fms, expected %.0f–%.0fms "
+                    "(keeping in queue)",
                     sensor_id, delta_ms, window[0], window[1],
                 )
                 return
 
-            # Timing is valid — take exclusive ownership before releasing lock
+            # Valid timing — take exclusive ownership
             item = self._queue.popleft()
-        # ── Lock released here; `item` is now thread-local ────────────────
+        # ── Lock released ─────────────────────────────────────────────────
 
-        # ── Validate sensor-servo mapping ──────────────────────────────────
-        # CRITICAL: Ensure the IR sensor that triggered matches the expected
-        # servo position for this fruit.
-        #
-        # Physical layout assumption:
-        #   IR1 → SERVO1 (station 1, e.g., GREEN)
-        #   IR2 → SERVO2 (station 2, e.g., YELLOW)
-        #
-        # If IR2 triggers but item.action is SERVO1_FIRE, the fruit is at
-        # the wrong position — it should have been sorted at IR1 but wasn't.
-        # Sorting it now at IR2 would fire SERVO1 too late (fruit already
-        # passed the servo).
-        #
-        # Solution: Validate sensor_id matches expected servo_id from action.
-        # If mismatch, log error and treat as missed fruit.
-        
+        # ── Sensor-servo mapping validation ───────────────────────────────
         expected_servo_id = self._get_expected_servo(item)
-        
         if expected_servo_id is not None and expected_servo_id != sensor_id:
             log.error(
-                "IR%d: Sensor-servo mismatch! %s expects SERVO%d but triggered at IR%d. "
-                "Fruit missed correct sorting position. Dropping.",
-                sensor_id, item.fruit_color.value, expected_servo_id, sensor_id
+                "IR%d: Sensor-servo mismatch! %s expects SERVO%d but "
+                "triggered at IR%d. Fruit missed correct station. Dropping.",
+                sensor_id, item.fruit_color.value,
+                expected_servo_id, sensor_id,
             )
-            # Do not dispatch - fruit is at wrong position
             return
-        
+
         self._dispatch(sensor_id, item)
-    
+
     def _get_expected_servo(self, item: DetectionResult) -> int | None:
         """Extract expected servo ID from item action.
         Returns None for PASS/REJECT actions (no servo needed)."""
         if item.action in (SortAction.PASS, SortAction.REJECT):
             return None
-        
-        # Extract servo ID from action (e.g., "SERVO1_FIRE" → 1)
         parts = item.action.value.split("_")
-        servo_id = int(parts[0].replace("SERVO", ""))
-        return servo_id
+        return int(parts[0].replace("SERVO", ""))
 
     # ── Dispatch ───────────────────────────────────────────────────────────
     #
     # Called with an exclusively-owned DetectionResult.
-    # No shared mutable state is accessed here (serial.send() is itself
-    # thread-safe via its own internal lock inside SerialLink).
+    # serial.send() is thread-safe via SerialLink's internal TX lock.
 
     def _dispatch(self, sensor_id: int, item: DetectionResult) -> None:
         is_pass   = item.action == SortAction.PASS
@@ -229,19 +210,30 @@ class SortController(threading.Thread):
 
         if is_pass or is_reject:
             status = "PASS" if is_pass else "REJECT"
-            log.info("IR%d: %s → %s (no servo)", sensor_id, item.fruit_color.value, status)
+            log.info(
+                "IR%d: %s → %s (no sweep)",
+                sensor_id, item.fruit_color.value, status,
+            )
         else:
             parts    = item.action.value.split("_")
             servo_id = int(parts[0].replace("SERVO", ""))
-            ok       = self._serial.send(cmd_sort(servo_id, "fire"))
-            status   = "OK" if ok else "SERIAL_ERR"
-            log.info("IR%d: %s → SERVO%d FIRE [conf=%.2f] [%s]",
-                 sensor_id, item.fruit_color.value,
-                 servo_id, item.confidence, status)
 
-        bus.emit(EVT_SORT_DONE,
-             fruit_color=item.fruit_color.value,
-             is_reject=(item.action == SortAction.REJECT))
+            # Send SORT command — Arduino will execute the sweep asynchronously
+            ok     = self._serial.send(cmd_sort(servo_id, "fire"))
+            status = "OK" if ok else "SERIAL_ERR"
+            log.info(
+                "IR%d: %s → SERVO%d SWEEP [conf=%.2f] [%s] "
+                "(sweep_cycle~%d ms)",
+                sensor_id, item.fruit_color.value,
+                servo_id, item.confidence, status,
+                self._sweep_cycle_ms,
+            )
+
+        bus.emit(
+            EVT_SORT_DONE,
+            fruit_color=item.fruit_color.value,
+            is_reject=(item.action == SortAction.REJECT),
+        )
         self._push_db_event(item, sensor_id, (item.action == SortAction.REJECT))
 
     # ── DB event ───────────────────────────────────────────────────────────
@@ -252,7 +244,7 @@ class SortController(threading.Thread):
         station: int,
         is_reject: bool,
     ) -> None:
-        from shared.detection_result import SortEvent  # local import — avoids top-level cycle
+        from shared.detection_result import SortEvent  # local import — avoids cycle
         self._db_queue.append(
             SortEvent(
                 fruit_color=item.fruit_color.value,
