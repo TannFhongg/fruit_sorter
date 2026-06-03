@@ -3,9 +3,11 @@ tests/unit/test_sort_controller.py
 ===================================
 Kiểm tra SortController: FIFO order, timing gate, servo dispatch.
 
-v3.1 — Sweep mechanism with dynamic angle: servo nhận lệnh "fire" kèm angle
-từ config YAML, tự thực hiện sweep 0°→angle→0° trên Arduino.
-RPi gửi cmd_sort(servo_id, "fire", angle).
+v3.2 — Sweep mechanism with dynamic angle AND timing: servo nhận lệnh "fire"
+kèm angle, sweep_ms, return_ms từ config YAML, tự thực hiện sweep 0°→angle→0°
+trên Arduino với thời gian đúng.
+
+RPi gửi cmd_sort(servo_id, "fire", angle, sweep_ms, return_ms).
 
 Chạy: pytest tests/ -v
 """
@@ -154,8 +156,9 @@ class TestSweepDispatch:
     def test_green_servo1_sweep_command(self, controller):
         """
         GREEN → SERVO1_FIRE, trigger qua IR1 (sensor=1).
-        Lệnh gửi Arduino: SORT servo=1 dir=fire angle=120 (đọc từ config).
-        Arduino tự thực hiện sweep 0°→angle→0°.
+        Lệnh gửi Arduino: SORT servo=1 dir=fire angle=120 sweep_ms=200 return_ms=300
+        (tất cả đọc từ config).
+        Arduino tự thực hiện sweep 0°→angle→0° với timing đúng.
         """
         sc, q, _, _, serial = controller
         q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
@@ -166,14 +169,20 @@ class TestSweepDispatch:
         assert serial.send.called, "serial.send() phải được gọi cho GREEN"
         call_bytes = serial.send.call_args[0][0]
         cmd = json.loads(call_bytes.decode().strip())
-        assert cmd["cmd"]   == "SORT"
-        assert cmd["servo"] == 1
-        assert cmd["dir"]   == "fire"
-        assert cmd["angle"] == 120  # angle từ config
+        assert cmd["cmd"]       == "SORT"
+        assert cmd["servo"]     == 1
+        assert cmd["dir"]       == "fire"
+        assert cmd["angle"]     == 120  # angle từ config
+        assert cmd["sweep_ms"]  == 200  # timing từ config
+        assert cmd["return_ms"] == 300  # timing từ config
 
     def test_custom_angle_from_config(self):
         """
-        Verify rằng khi config YAML có angle khác, angle đúng được gửi.
+        Verify rằng khi config YAML có angle + timing khác, 
+        các giá trị đúng được gửi xuống Arduino.
+        
+        Physical consistency: angle_sweep 180° cần sweep_duration_ms cao hơn 
+        (ví dụ 350ms) để servo có đủ thời gian hoàn thành hành trình.
         """
         cfg = {
             "conveyor": {"timing": {
@@ -189,12 +198,14 @@ class TestSweepDispatch:
             "hardware": {
                 "servos": {
                     "servo1": {
-                        "angle_home": 0, "angle_sweep": 150,  # góc custom 150°
-                        "sweep_duration_ms": 200, "return_duration_ms": 300,
+                        "angle_home": 0, "angle_sweep": 180,  # góc custom 180°
+                        "sweep_duration_ms": 350,              # thời gian tăng tương ứng
+                        "return_duration_ms": 400,
                     },
                     "servo2": {
                         "angle_home": 0, "angle_sweep": 90,   # góc custom 90°
-                        "sweep_duration_ms": 200, "return_duration_ms": 300,
+                        "sweep_duration_ms": 150,              # thời gian giảm tương ứng
+                        "return_duration_ms": 250,
                     },
                 }
             },
@@ -221,28 +232,33 @@ class TestSweepDispatch:
             stop_event=stop,
         )
 
-        # Test servo1 với angle 150°
+        # Test servo1 với angle 180° + timing 350/400ms
         q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
 
         import json
         call_bytes = serial_mock.send.call_args[0][0]
         cmd = json.loads(call_bytes.decode().strip())
-        assert cmd["angle"] == 150, "Servo1 phải gửi angle=150 từ config"
+        assert cmd["angle"]     == 180, "Servo1 phải gửi angle=180 từ config"
+        assert cmd["sweep_ms"]  == 350, "Servo1 phải gửi sweep_ms=350 từ config"
+        assert cmd["return_ms"] == 400, "Servo1 phải gửi return_ms=400 từ config"
 
-        # Test servo2 với angle 90°
+        # Test servo2 với angle 90° + timing 150/250ms
         serial_mock.reset_mock()
         q.append(_make_det("YELLOW", 1500, SortAction.SERVO2_FIRE))
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 2})
 
         call_bytes = serial_mock.send.call_args[0][0]
         cmd = json.loads(call_bytes.decode().strip())
-        assert cmd["angle"] == 90, "Servo2 phải gửi angle=90 từ config"
+        assert cmd["angle"]     == 90,  "Servo2 phải gửi angle=90 từ config"
+        assert cmd["sweep_ms"]  == 150, "Servo2 phải gửi sweep_ms=150 từ config"
+        assert cmd["return_ms"] == 250, "Servo2 phải gửi return_ms=250 từ config"
 
     def test_yellow_servo2_sweep_command(self, controller):
         """
         YELLOW → SERVO2_FIRE, trigger qua IR2 (sensor=2).
-        Lệnh gửi Arduino: SORT servo=2 dir=fire angle=120 (đọc từ config).
+        Lệnh gửi Arduino: SORT servo=2 dir=fire angle=120 sweep_ms=200 return_ms=300
+        (tất cả đọc từ config).
 
         Vật lý: IR2 nằm sau IR1 trên băng chuyền, phục vụ SERVO2.
         Timing window của IR2: [1200, 1800]ms (xa camera hơn IR1).
@@ -256,10 +272,12 @@ class TestSweepDispatch:
         assert serial.send.called, "serial.send() phải được gọi cho YELLOW"
         call_bytes = serial.send.call_args[0][0]
         cmd = json.loads(call_bytes.decode().strip())
-        assert cmd["cmd"]   == "SORT"
-        assert cmd["servo"] == 2
-        assert cmd["dir"]   == "fire"
-        assert cmd["angle"] == 120  # angle từ config
+        assert cmd["cmd"]       == "SORT"
+        assert cmd["servo"]     == 2
+        assert cmd["dir"]       == "fire"
+        assert cmd["angle"]     == 120  # angle từ config
+        assert cmd["sweep_ms"]  == 200  # timing từ config
+        assert cmd["return_ms"] == 300  # timing từ config
 
     def test_red_no_servo_sent(self, controller):
         """Quả đỏ → PASS → không gửi lệnh SORT."""

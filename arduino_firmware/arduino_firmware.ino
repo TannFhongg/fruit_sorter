@@ -92,15 +92,10 @@
 // SERVO_SWEEP_ANGLE is now dynamic — read from incoming JSON command
 
 // ── Timing ────────────────────────────────────────────────────────────────
-// SWEEP_DURATION_MS: time to hold the swept position.
-//   MG996R @ 6V moves 60° in ~0.14s → 120° in ~0.28s.
-//   We command the target angle and wait SWEEP_DURATION_MS before returning.
-//   200 ms gives the servo time to reach full angle and strike the fruit.
-#define SWEEP_DURATION_MS   200
-
-// RETURN_DURATION_MS: time to let the servo return to home before
-//   declaring the servo idle. Slightly longer to avoid back-striking.
-#define RETURN_DURATION_MS  300
+// SWEEP_DURATION_MS and RETURN_DURATION_MS are now DYNAMIC — read from JSON.
+// Defaults below are only used as fallback if not specified in command.
+#define DEFAULT_SWEEP_DURATION_MS   200
+#define DEFAULT_RETURN_DURATION_MS  300
 
 #define DEBOUNCE_MS         20    // minimum ms between two valid IR triggers
 #define SERIAL_BAUD      115200
@@ -128,6 +123,12 @@ ServoPhase servo1_phase    = PHASE_IDLE;
 ServoPhase servo2_phase    = PHASE_IDLE;
 uint32_t   servo1_phase_start_ms = 0;
 uint32_t   servo2_phase_start_ms = 0;
+
+// Dynamic timing per servo (read from incoming JSON command)
+uint16_t   servo1_sweep_duration_ms  = DEFAULT_SWEEP_DURATION_MS;
+uint16_t   servo1_return_duration_ms = DEFAULT_RETURN_DURATION_MS;
+uint16_t   servo2_sweep_duration_ms  = DEFAULT_SWEEP_DURATION_MS;
+uint16_t   servo2_return_duration_ms = DEFAULT_RETURN_DURATION_MS;
 
 // ── Other state ───────────────────────────────────────────────────────────
 uint32_t boot_ms = 0;
@@ -201,7 +202,7 @@ void check_servo_state() {
 
   // ── Servo 1 ─────────────────────────────────────────────────────
   if (servo1_phase == PHASE_SWEEPING) {
-    if ((now - servo1_phase_start_ms) >= SWEEP_DURATION_MS) {
+    if ((now - servo1_phase_start_ms) >= servo1_sweep_duration_ms) {
       // Sweep complete → command return to home
       servo1.write(SERVO_HOME);
       servo1_phase          = PHASE_RETURNING;
@@ -209,7 +210,7 @@ void check_servo_state() {
     }
   }
   else if (servo1_phase == PHASE_RETURNING) {
-    if ((now - servo1_phase_start_ms) >= RETURN_DURATION_MS) {
+    if ((now - servo1_phase_start_ms) >= servo1_return_duration_ms) {
       servo1_phase = PHASE_IDLE;
       if (servo2_phase == PHASE_IDLE) {
         digitalWrite(PIN_STATUS_LED, LOW);  // both idle → LED off
@@ -219,14 +220,14 @@ void check_servo_state() {
 
   // ── Servo 2 ─────────────────────────────────────────────────────
   if (servo2_phase == PHASE_SWEEPING) {
-    if ((now - servo2_phase_start_ms) >= SWEEP_DURATION_MS) {
+    if ((now - servo2_phase_start_ms) >= servo2_sweep_duration_ms) {
       servo2.write(SERVO_HOME);
       servo2_phase          = PHASE_RETURNING;
       servo2_phase_start_ms = now;
     }
   }
   else if (servo2_phase == PHASE_RETURNING) {
-    if ((now - servo2_phase_start_ms) >= RETURN_DURATION_MS) {
+    if ((now - servo2_phase_start_ms) >= servo2_return_duration_ms) {
       servo2_phase = PHASE_IDLE;
       if (servo1_phase == PHASE_IDLE) {
         digitalWrite(PIN_STATUS_LED, LOW);
@@ -300,19 +301,24 @@ void handle_command(const char* raw) {
   const char* cmd = doc["cmd"] | "";
 
   if (strcmp(cmd, "SORT") == 0) {
-    uint8_t     servo_id  = doc["servo"]  | 0;
-    const char* direction = doc["dir"]    | "home";
-    int         angle     = doc["angle"]  | 120;  // read angle from JSON (default 120)
+    uint8_t     servo_id   = doc["servo"]     | 0;
+    const char* direction  = doc["dir"]       | "home";
+    int         angle      = doc["angle"]     | 120;      // read angle from JSON
+    int         sweep_ms   = doc["sweep_ms"]  | DEFAULT_SWEEP_DURATION_MS;
+    int         return_ms  = doc["return_ms"] | DEFAULT_RETURN_DURATION_MS;
 
-    actuate_servo(servo_id, direction, angle);
+    actuate_servo(servo_id, direction, angle, sweep_ms, return_ms);
 
     // ACK immediately — actual sweep runs asynchronously in loop().
-    // total_ms = SWEEP_DURATION_MS + RETURN_DURATION_MS (for caller info)
+    // total_ms = sweep_ms + return_ms (nominal time for caller info)
+    uint16_t total = (servo_id == 1) 
+                     ? servo1_sweep_duration_ms + servo1_return_duration_ms
+                     : servo2_sweep_duration_ms + servo2_return_duration_ms;
     StaticJsonDocument<96> resp;
     resp["ack"]      = "SORT_DONE";
     resp["servo"]    = servo_id;
     resp["angle"]    = angle;
-    resp["total_ms"] = SWEEP_DURATION_MS + RETURN_DURATION_MS;
+    resp["total_ms"] = total;
     serializeJson(resp, Serial);
     Serial.println();
   }
@@ -341,21 +347,21 @@ void handle_command(const char* raw) {
     int32_t s1_remaining_ms = 0;
     if (servo1_phase == PHASE_SWEEPING) {
       uint32_t elapsed = now - servo1_phase_start_ms;
-      s1_remaining_ms  = (int32_t)SWEEP_DURATION_MS - (int32_t)elapsed
-                        + (int32_t)RETURN_DURATION_MS;
+      s1_remaining_ms  = (int32_t)servo1_sweep_duration_ms - (int32_t)elapsed
+                        + (int32_t)servo1_return_duration_ms;
     } else if (servo1_phase == PHASE_RETURNING) {
       uint32_t elapsed = now - servo1_phase_start_ms;
-      s1_remaining_ms  = (int32_t)RETURN_DURATION_MS - (int32_t)elapsed;
+      s1_remaining_ms  = (int32_t)servo1_return_duration_ms - (int32_t)elapsed;
     }
 
     int32_t s2_remaining_ms = 0;
     if (servo2_phase == PHASE_SWEEPING) {
       uint32_t elapsed = now - servo2_phase_start_ms;
-      s2_remaining_ms  = (int32_t)SWEEP_DURATION_MS - (int32_t)elapsed
-                        + (int32_t)RETURN_DURATION_MS;
+      s2_remaining_ms  = (int32_t)servo2_sweep_duration_ms - (int32_t)elapsed
+                        + (int32_t)servo2_return_duration_ms;
     } else if (servo2_phase == PHASE_RETURNING) {
       uint32_t elapsed = now - servo2_phase_start_ms;
-      s2_remaining_ms  = (int32_t)RETURN_DURATION_MS - (int32_t)elapsed;
+      s2_remaining_ms  = (int32_t)servo2_return_duration_ms - (int32_t)elapsed;
     }
 
     StaticJsonDocument<256> resp;
@@ -384,9 +390,9 @@ void handle_command(const char* raw) {
 //   Immediately write sweep_angle to the servo (read from JSON command).
 //   The MG996R will physically slew from 0° to sweep_angle at full speed
 //   (approx 0.14 s/60° → reaches 120° in ~280 ms).
-//   check_servo_state() monitors SWEEP_DURATION_MS (200 ms) then
-//   commands the return. The 200 ms window is chosen so the flap
-//   strikes the fruit as it passes through the station.
+//   check_servo_state() monitors sweep_duration_ms then commands the return.
+//   Both sweep_duration_ms and return_duration_ms are now read from JSON,
+//   synced with Raspberry Pi config (hardware_config.yaml).
 //
 // "home" / any other direction:
 //   Immediately write HOME angle. Useful for RESET commands.
@@ -395,10 +401,20 @@ void handle_command(const char* raw) {
 //   sweeping/returning, we restart the sweep phase. This is safe on
 //   single-core AVR because Serial commands are processed sequentially.
 
-void actuate_servo(uint8_t id, const char* direction, int sweep_angle) {
+void actuate_servo(uint8_t id, const char* direction, int sweep_angle, 
+                   int sweep_ms, int return_ms) {
   Servo&      srv        = (id == 1) ? servo1          : servo2;
   ServoPhase& phase_ref  = (id == 1) ? servo1_phase    : servo2_phase;
   uint32_t&   start_ref  = (id == 1) ? servo1_phase_start_ms : servo2_phase_start_ms;
+
+  // Store dynamic timing parameters for this servo
+  if (id == 1) {
+    servo1_sweep_duration_ms  = sweep_ms;
+    servo1_return_duration_ms = return_ms;
+  } else {
+    servo2_sweep_duration_ms  = sweep_ms;
+    servo2_return_duration_ms = return_ms;
+  }
 
   if (strcmp(direction, "fire") == 0) {
     // Command the sweep angle from JSON (synced with Raspberry Pi config).

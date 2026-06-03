@@ -4,16 +4,31 @@ control/sort_controller.py
 Thread 2 — nhận IR_TRIGGER từ Arduino Slave, khớp với DetectionResult
 trong queue theo cửa sổ thời gian, kích servo sweep tương ứng.
 
-v3.1 — Dynamic angle synchronization
-=====================================
-IMPORTANT CHANGE: Sweep angle giờ được đọc từ config YAML và gửi
-trong mỗi lệnh SORT. Arduino không còn dùng #define hardcode nữa.
+v3.2 — Dynamic angle AND timing synchronization
+================================================
+IMPORTANT CHANGES:
+  1. Sweep angle được đọc từ config YAML và gửi trong mỗi lệnh SORT
+  2. Sweep timing (sweep_duration_ms, return_duration_ms) cũng được
+     đọc từ config và gửi trong mỗi lệnh SORT
 
-Điều này cho phép thay đổi góc quét (angle_sweep) trong file
-config/hardware_config.yaml mà không cần biên dịch lại Arduino firmware.
+Arduino không còn dùng #define hardcode cho cả góc và thời gian nữa.
+
+Điều này cho phép thay đổi:
+  - Góc quét (angle_sweep): ví dụ 120° → 180° để lực gạt mạnh hơn
+  - Thời gian quét (sweep_duration_ms): phải tăng tương ứng với góc
+    để servo có đủ thời gian hoàn thành hành trình
+  - Thời gian về (return_duration_ms): điều chỉnh tốc độ trở về
+
+...tất cả trong file config/hardware_config.yaml mà không cần biên dịch 
+lại Arduino firmware.
+
+PHYSICAL CONSISTENCY:
+  Nếu tăng angle_sweep (ví dụ: 120° → 180°), BẮT BUỘC phải tăng
+  sweep_duration_ms tương ứng. Nếu không, servo MG996R sẽ chỉ quay
+  được một phần góc rồi bị ép quay về, gây mất đồng bộ vật lý.
 
 Lệnh gửi xuống Arduino:
-  {"cmd":"SORT","servo":1,"dir":"fire","angle":120}
+  {"cmd":"SORT","servo":1,"dir":"fire","angle":120,"sweep_ms":200,"return_ms":300}
 
 v3.0 — SWEEP timing
 ====================
@@ -85,6 +100,16 @@ class SortController(threading.Thread):
             2: s2.get("angle_sweep", 120),
         }
 
+        # Read servo timing parameters from config
+        self._servo_sweep_ms: dict[int, int] = {
+            1: s1.get("sweep_duration_ms", 200),
+            2: s2.get("sweep_duration_ms", 200),
+        }
+        self._servo_return_ms: dict[int, int] = {
+            1: s1.get("return_duration_ms", 300),
+            2: s2.get("return_duration_ms", 300),
+        }
+
         # Total sweep cycle time per servo (sweep + return).
         # Used for logging/diagnostics only — the Arduino manages its own timer.
         self._sweep_cycle_ms = (
@@ -92,8 +117,9 @@ class SortController(threading.Thread):
             s1.get("return_duration_ms", 300)
         )
         log.info(
-            "SortController init | windows=%s | angles=%s | sweep_cycle=%d ms",
-            self._windows, self._servo_angles, self._sweep_cycle_ms,
+            "SortController init | windows=%s | angles=%s | timing=%s/%s | cycle=%d ms",
+            self._windows, self._servo_angles, self._servo_sweep_ms, 
+            self._servo_return_ms, self._sweep_cycle_ms,
         )
 
     # ── Main loop ──────────────────────────────────────────────────────────
@@ -237,18 +263,18 @@ class SortController(threading.Thread):
             parts    = item.action.value.split("_")
             servo_id = int(parts[0].replace("SERVO", ""))
             
-            # Get sweep angle from config for this servo
+            # Get sweep angle and timing from config for this servo
             sweep_angle = self._servo_angles.get(servo_id, 120)
+            sweep_ms    = self._servo_sweep_ms.get(servo_id, 200)
+            return_ms   = self._servo_return_ms.get(servo_id, 300)
 
-            # Send SORT command with angle — Arduino will execute the sweep asynchronously
-            ok     = self._serial.send(cmd_sort(servo_id, "fire", sweep_angle))
+            # Send SORT command with angle + timing — Arduino will execute the sweep asynchronously
+            ok     = self._serial.send(cmd_sort(servo_id, "fire", sweep_angle, sweep_ms, return_ms))
             status = "OK" if ok else "SERIAL_ERR"
             log.info(
-                "IR%d: %s → SERVO%d SWEEP [angle=%d°] [conf=%.2f] [%s] "
-                "(sweep_cycle~%d ms)",
+                "IR%d: %s → SERVO%d SWEEP [angle=%d°] [%dms/%dms] [conf=%.2f] [%s]",
                 sensor_id, item.fruit_color.value,
-                servo_id, sweep_angle, item.confidence, status,
-                self._sweep_cycle_ms,
+                servo_id, sweep_angle, sweep_ms, return_ms, item.confidence, status,
             )
 
         bus.emit(

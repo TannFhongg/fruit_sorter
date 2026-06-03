@@ -2,11 +2,11 @@
 shared/serial_protocol.py
 Giao thức UART JSON giữa RPi (Master) và Arduino (Slave).
 
-v3.1 — SWEEP mechanism with dynamic angle
-==========================================
+v3.2 — SWEEP mechanism with dynamic angle AND timing
+=====================================================
 Master → Slave:
-  {"cmd":"SORT","servo":1,"dir":"fire","angle":120}    ← kích cú quét với góc từ config
-  {"cmd":"SORT","servo":1,"dir":"home","angle":0}      ← về vị trí nghỉ (reset)
+  {"cmd":"SORT","servo":1,"dir":"fire","angle":120,"sweep_ms":200,"return_ms":300}
+  {"cmd":"SORT","servo":1,"dir":"home","angle":0,"sweep_ms":200,"return_ms":300}
   {"cmd":"PING"}
   {"cmd":"RESET"}
   {"cmd":"STATUS"}
@@ -18,14 +18,20 @@ Slave → Master:
   {"ack":"STATUS","servo1_phase":0,"servo2_phase":0,...}
   {"ack":"ERROR","msg":"unknown_cmd"}
 
-SORT_DONE.total_ms = SWEEP_DURATION_MS + RETURN_DURATION_MS (nominal).
+SORT_DONE.total_ms = sweep_ms + return_ms (nominal).
 Servo is still physically moving when SORT_DONE is received;
 Master treats it as "command accepted", not "servo idle".
 
-ANGLE SYNCHRONIZATION (v3.1):
-  Raspberry Pi reads angle_sweep from config/hardware_config.yaml and sends
-  it in every SORT command. Arduino no longer uses hardcoded #define for angle.
+ANGLE & TIMING SYNCHRONIZATION (v3.2):
+  Raspberry Pi reads angle_sweep, sweep_duration_ms, and return_duration_ms
+  from config/hardware_config.yaml and sends them in every SORT command.
+  Arduino no longer uses hardcoded #define for angle or timing.
   This ensures config changes on RPi take immediate effect without Arduino recompile.
+  
+  Physical consistency: If you increase angle_sweep (e.g., 120° → 180°),
+  you must also increase sweep_duration_ms proportionally to give the servo
+  enough time to complete the motion. Otherwise, the servo will be cut off
+  mid-sweep and forced to return prematurely.
 """
 
 from __future__ import annotations
@@ -33,7 +39,8 @@ import json
 from typing import Optional
 
 
-def cmd_sort(servo_id: int, direction: str, angle: int = 120) -> bytes:
+def cmd_sort(servo_id: int, direction: str, angle: int = 120, 
+             sweep_ms: int = 200, return_ms: int = 300) -> bytes:
     """
     Build a SORT command.
 
@@ -42,8 +49,17 @@ def cmd_sort(servo_id: int, direction: str, angle: int = 120) -> bytes:
       "home" → immediately return to home (used by RESET flow)
     
     angle: sweep angle in degrees (default 120, read from config)
+    sweep_ms: sweep phase duration in ms (default 200, read from config)
+    return_ms: return phase duration in ms (default 300, read from config)
     """
-    return _enc({"cmd": "SORT", "servo": servo_id, "dir": direction, "angle": angle})
+    return _enc({
+        "cmd": "SORT", 
+        "servo": servo_id, 
+        "dir": direction, 
+        "angle": angle,
+        "sweep_ms": sweep_ms,
+        "return_ms": return_ms
+    })
 
 def cmd_ping()   -> bytes: return _enc({"cmd": "PING"})
 def cmd_reset()  -> bytes: return _enc({"cmd": "RESET"})
