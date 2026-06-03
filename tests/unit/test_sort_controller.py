@@ -3,9 +3,9 @@ tests/unit/test_sort_controller.py
 ===================================
 Kiểm tra SortController: FIFO order, timing gate, servo dispatch.
 
-v3.0 — Sweep mechanism: servo nhận lệnh "fire" và tự thực hiện
-sweep 0°→120°→0° trên Arduino. RPi chỉ gửi cmd_sort(servo_id, "fire").
-Các test case không thay đổi về logic — chỉ cập nhật comment.
+v3.1 — Sweep mechanism with dynamic angle: servo nhận lệnh "fire" kèm angle
+từ config YAML, tự thực hiện sweep 0°→angle→0° trên Arduino.
+RPi gửi cmd_sort(servo_id, "fire", angle).
 
 Chạy: pytest tests/ -v
 """
@@ -154,8 +154,8 @@ class TestSweepDispatch:
     def test_green_servo1_sweep_command(self, controller):
         """
         GREEN → SERVO1_FIRE, trigger qua IR1 (sensor=1).
-        Lệnh gửi Arduino: SORT servo=1 dir=fire.
-        Arduino tự thực hiện sweep 0°→120°→0°.
+        Lệnh gửi Arduino: SORT servo=1 dir=fire angle=120 (đọc từ config).
+        Arduino tự thực hiện sweep 0°→angle→0°.
         """
         sc, q, _, _, serial = controller
         q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
@@ -169,11 +169,80 @@ class TestSweepDispatch:
         assert cmd["cmd"]   == "SORT"
         assert cmd["servo"] == 1
         assert cmd["dir"]   == "fire"
+        assert cmd["angle"] == 120  # angle từ config
+
+    def test_custom_angle_from_config(self):
+        """
+        Verify rằng khi config YAML có angle khác, angle đúng được gửi.
+        """
+        cfg = {
+            "conveyor": {"timing": {
+                "ir1_window_ms": [700, 1000],
+                "ir2_window_ms": [1200, 1800],
+            }},
+            "arduino": {
+                "serial":    {"port": "/dev/ttyUSB0", "baudrate": 115200,
+                              "timeout_s": 1.0, "reconnect_delay_s": 1.0,
+                              "reconnect_max": 3},
+                "heartbeat": {"interval_s": 5, "max_missed": 3},
+            },
+            "hardware": {
+                "servos": {
+                    "servo1": {
+                        "angle_home": 0, "angle_sweep": 150,  # góc custom 150°
+                        "sweep_duration_ms": 200, "return_duration_ms": 300,
+                    },
+                    "servo2": {
+                        "angle_home": 0, "angle_sweep": 90,   # góc custom 90°
+                        "sweep_duration_ms": 200, "return_duration_ms": 300,
+                    },
+                }
+            },
+            "database": {},
+        }
+
+        serial_mock = MagicMock()
+        serial_mock.is_connected = True
+        serial_mock.send.return_value = True
+        serial_mock.read_line.return_value = None
+
+        q    = deque(maxlen=20)
+        lock = threading.Lock()
+        dbq  = deque(maxlen=100)
+        stop = threading.Event()
+
+        from control.sort_controller import SortController
+        sc = SortController(
+            cfg=cfg,
+            serial_link=serial_mock,
+            detection_queue=q,
+            queue_lock=lock,
+            db_write_queue=dbq,
+            stop_event=stop,
+        )
+
+        # Test servo1 với angle 150°
+        q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+
+        import json
+        call_bytes = serial_mock.send.call_args[0][0]
+        cmd = json.loads(call_bytes.decode().strip())
+        assert cmd["angle"] == 150, "Servo1 phải gửi angle=150 từ config"
+
+        # Test servo2 với angle 90°
+        serial_mock.reset_mock()
+        q.append(_make_det("YELLOW", 1500, SortAction.SERVO2_FIRE))
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 2})
+
+        call_bytes = serial_mock.send.call_args[0][0]
+        cmd = json.loads(call_bytes.decode().strip())
+        assert cmd["angle"] == 90, "Servo2 phải gửi angle=90 từ config"
 
     def test_yellow_servo2_sweep_command(self, controller):
         """
         YELLOW → SERVO2_FIRE, trigger qua IR2 (sensor=2).
-        Lệnh gửi Arduino: SORT servo=2 dir=fire.
+        Lệnh gửi Arduino: SORT servo=2 dir=fire angle=120 (đọc từ config).
 
         Vật lý: IR2 nằm sau IR1 trên băng chuyền, phục vụ SERVO2.
         Timing window của IR2: [1200, 1800]ms (xa camera hơn IR1).
@@ -190,6 +259,7 @@ class TestSweepDispatch:
         assert cmd["cmd"]   == "SORT"
         assert cmd["servo"] == 2
         assert cmd["dir"]   == "fire"
+        assert cmd["angle"] == 120  # angle từ config
 
     def test_red_no_servo_sent(self, controller):
         """Quả đỏ → PASS → không gửi lệnh SORT."""

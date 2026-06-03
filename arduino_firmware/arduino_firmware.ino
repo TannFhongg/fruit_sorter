@@ -16,6 +16,13 @@
  *
  * Protocol: JSON one-liner + '\n' @ 115200 baud
  *
+ * Example commands:
+ *   {"cmd":"SORT","servo":1,"dir":"fire","angle":120}
+ *   {"cmd":"SORT","servo":1,"dir":"home","angle":0}
+ *   {"cmd":"PING"}
+ *   {"cmd":"RESET"}
+ *   {"cmd":"STATUS"}
+ *
  * =====================================================================
  * SWEEP mechanism (v3.0)
  * =====================================================================
@@ -24,12 +31,16 @@
  *
  * NEW design ("sweep" / flap):
  *   1. Flap rests at 0° (parallel to conveyor — no obstruction).
- *   2. On SORT command: servo sweeps 0° → SWEEP_ANGLE (120°) in
- *      SWEEP_DURATION_MS (~200 ms). The EDGE of the flap "slaps"
+ *   2. On SORT command: servo sweeps 0° → angle (read from JSON, typically 120°)
+ *      in SWEEP_DURATION_MS (~200 ms). The EDGE of the flap "slaps"
  *      the fruit sideways as it passes through the station.
  *   3. After sweep completes, servo returns to 0° (home) at a
  *      slightly slower pace (RETURN_DURATION_MS ~300 ms) to avoid
  *      hitting any fruit still on the belt.
+ *
+ * IMPORTANT: The sweep angle is now READ FROM JSON sent by Raspberry Pi,
+ * which reads it from config/hardware_config.yaml. Changing angle_sweep
+ * in the YAML file will now take effect immediately — no Arduino recompile needed.
  *
  * Why MG996R works well here:
  *   - Stall torque 9–11 kg·cm @ 6V → ample force for a fast sweep
@@ -78,7 +89,7 @@
 
 // ── Servo angles ──────────────────────────────────────────────────────────
 #define SERVO_HOME          0     // resting position — parallel to belt
-#define SERVO_SWEEP_ANGLE   120   // maximum sweep angle (degrees)
+// SERVO_SWEEP_ANGLE is now dynamic — read from incoming JSON command
 
 // ── Timing ────────────────────────────────────────────────────────────────
 // SWEEP_DURATION_MS: time to hold the swept position.
@@ -291,14 +302,16 @@ void handle_command(const char* raw) {
   if (strcmp(cmd, "SORT") == 0) {
     uint8_t     servo_id  = doc["servo"]  | 0;
     const char* direction = doc["dir"]    | "home";
+    int         angle     = doc["angle"]  | 120;  // read angle from JSON (default 120)
 
-    actuate_servo(servo_id, direction);
+    actuate_servo(servo_id, direction, angle);
 
     // ACK immediately — actual sweep runs asynchronously in loop().
     // total_ms = SWEEP_DURATION_MS + RETURN_DURATION_MS (for caller info)
     StaticJsonDocument<96> resp;
     resp["ack"]      = "SORT_DONE";
     resp["servo"]    = servo_id;
+    resp["angle"]    = angle;
     resp["total_ms"] = SWEEP_DURATION_MS + RETURN_DURATION_MS;
     serializeJson(resp, Serial);
     Serial.println();
@@ -368,8 +381,8 @@ void handle_command(const char* raw) {
 // ── Actuate a servo — NON-BLOCKING SWEEP ─────────────────────────────────
 //
 // "fire" direction:
-//   Immediately write SWEEP_ANGLE to the servo.
-//   The MG996R will physically slew from 0° to 120° at full speed
+//   Immediately write sweep_angle to the servo (read from JSON command).
+//   The MG996R will physically slew from 0° to sweep_angle at full speed
 //   (approx 0.14 s/60° → reaches 120° in ~280 ms).
 //   check_servo_state() monitors SWEEP_DURATION_MS (200 ms) then
 //   commands the return. The 200 ms window is chosen so the flap
@@ -382,15 +395,15 @@ void handle_command(const char* raw) {
 //   sweeping/returning, we restart the sweep phase. This is safe on
 //   single-core AVR because Serial commands are processed sequentially.
 
-void actuate_servo(uint8_t id, const char* direction) {
+void actuate_servo(uint8_t id, const char* direction, int sweep_angle) {
   Servo&      srv        = (id == 1) ? servo1          : servo2;
   ServoPhase& phase_ref  = (id == 1) ? servo1_phase    : servo2_phase;
   uint32_t&   start_ref  = (id == 1) ? servo1_phase_start_ms : servo2_phase_start_ms;
 
   if (strcmp(direction, "fire") == 0) {
-    // Command the full sweep angle immediately.
-    // MG996R will reach 120° under its own speed profile.
-    srv.write(SERVO_SWEEP_ANGLE);
+    // Command the sweep angle from JSON (synced with Raspberry Pi config).
+    // MG996R will reach the target angle under its own speed profile.
+    srv.write(sweep_angle);
     digitalWrite(PIN_STATUS_LED, HIGH);
     phase_ref = PHASE_SWEEPING;
     start_ref = millis();
