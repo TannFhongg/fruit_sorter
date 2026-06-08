@@ -135,6 +135,7 @@ def _center_distance(a: tuple[int, int, int, int], b: tuple[int, int, int, int])
 class _ObjectTrack:
     track_id: int
     label: str
+    label_streak: int
     bbox: tuple[int, int, int, int]
     last_seen_frame_id: int
     last_seen_ts_ms: float
@@ -651,20 +652,23 @@ class FruitDetector(threading.Thread):
 
     def _claim_new_object(self, det: dict, capture_ts_ms: float) -> bool:
         """
-        Return True only the first time a physical object is seen.
+        Return True only once a physical object's label is stable.
 
         Inference runs on several frames while the same fruit remains in view.
         This lightweight tracker matches detections by bbox overlap/center
-        movement and marks the track as already enqueued after the first claim.
+        movement and waits for two consecutive matching labels before
+        allowing the detection to be enqueued.
         """
         self._expire_tracks(capture_ts_ms)
 
         bbox = det["bbox"]
+        label = det["label"]
         track = self._match_track(bbox)
         if track is None:
             track = _ObjectTrack(
                 track_id=self._next_track_id,
-                label=det["label"],
+                label=label,
+                label_streak=1,
                 bbox=bbox,
                 last_seen_frame_id=self._frame_id,
                 last_seen_ts_ms=capture_ts_ms,
@@ -672,7 +676,11 @@ class FruitDetector(threading.Thread):
             self._tracks[track.track_id] = track
             self._next_track_id += 1
         else:
-            track.label = det["label"]
+            if track.label == label:
+                track.label_streak += 1
+            else:
+                track.label = label
+                track.label_streak = 1
             track.bbox = bbox
             track.last_seen_frame_id = self._frame_id
             track.last_seen_ts_ms = capture_ts_ms
@@ -682,6 +690,9 @@ class FruitDetector(threading.Thread):
                 "Skipping duplicate detection for track=%d label=%s bbox=%s",
                 track.track_id, det["label"], bbox,
             )
+            return False
+
+        if track.label_streak < 2:
             return False
 
         track.enqueued = True

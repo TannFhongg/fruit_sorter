@@ -314,6 +314,36 @@ class TestSweepDispatch:
 
 class TestSensorServoMismatch:
 
+    def test_downstream_item_does_not_block_upstream_candidate(self, controller):
+        """
+        SERVO2_FIRE ở đầu queue không được chặn SERVO1_FIRE phía sau tại IR1.
+        """
+        sc, q, _, dbq, serial = controller
+        q.append(_make_det("YELLOW", 850, SortAction.SERVO2_FIRE))
+        q.append(_make_det("GREEN",  850, SortAction.SERVO1_FIRE))
+
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+
+        import json
+        serial.send.assert_called_once()
+        call_bytes = serial.send.call_args[0][0]
+        cmd = json.loads(call_bytes.decode().strip())
+        assert cmd["servo"] == 1
+        assert len(q) == 1
+        assert q[0].fruit_color == FruitColor.YELLOW
+        assert len(dbq) == 1
+
+        serial.reset_mock()
+        q[0].timestamp_ms = time.monotonic() * 1000 - 1500
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 2})
+
+        serial.send.assert_called_once()
+        call_bytes = serial.send.call_args[0][0]
+        cmd = json.loads(call_bytes.decode().strip())
+        assert cmd["servo"] == 2
+        assert len(q) == 0
+        assert len(dbq) == 2
+
     def test_downstream_servo_item_survives_upstream_ir(self, controller):
         """
         SERVO2_FIRE đi qua IR1 phải được giữ lại cho IR2.

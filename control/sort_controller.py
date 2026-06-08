@@ -182,54 +182,64 @@ class SortController(threading.Thread):
                 log.warning("IR%d triggered — queue empty after purge", sensor_id)
                 return
 
-            candidate = self._queue[0]
-            delta_ms  = now_ms - candidate.timestamp_ms
-            expected_servo_id = self._get_expected_servo(candidate)
+            for idx, candidate in enumerate(self._queue):
+                delta_ms  = now_ms - candidate.timestamp_ms
+                expected_servo_id = self._get_expected_servo(candidate)
 
-            # A fruit assigned to a downstream servo must pass upstream IR
-            # sensors without being consumed. Keep FIFO ownership until it
-            # reaches its expected station.
-            if expected_servo_id is not None:
-                if expected_servo_id > sensor_id:
-                    log.debug(
-                        "IR%d: %s expects SERVO%d downstream; keeping in queue "
-                        "(age=%.0fms)",
-                        sensor_id, candidate.fruit_color.value,
-                        expected_servo_id, delta_ms,
-                    )
-                    return
+                # A fruit assigned to a downstream servo must pass upstream IR
+                # sensors without being consumed. Keep scanning so it cannot
+                # block a later fruit that belongs to this station.
+                if expected_servo_id is not None:
+                    if expected_servo_id > sensor_id:
+                        log.debug(
+                            "IR%d: %s expects SERVO%d downstream; keeping in queue "
+                            "(age=%.0fms)",
+                            sensor_id, candidate.fruit_color.value,
+                            expected_servo_id, delta_ms,
+                        )
+                        continue
 
-                if expected_servo_id < sensor_id:
-                    missed = self._queue.popleft()
-                    log.error(
-                        "IR%d: %s expected SERVO%d upstream and reached IR%d. "
-                        "Dropping missed fruit.",
-                        sensor_id, missed.fruit_color.value,
-                        expected_servo_id, sensor_id,
-                    )
-                    return
+                    if expected_servo_id < sensor_id:
+                        missed = candidate
+                        del self._queue[idx]
+                        log.error(
+                            "IR%d: %s expected SERVO%d upstream and reached IR%d. "
+                            "Dropping missed fruit.",
+                            sensor_id, missed.fruit_color.value,
+                            expected_servo_id, sensor_id,
+                        )
+                        return
 
-            # ── Timing window check ───────────────────────────────────────
-            if not (window[0] <= delta_ms <= window[1]):
-                if delta_ms > window[1]:
-                    missed = self._queue.popleft()
+                # ── Timing window check ───────────────────────────────────
+                if not (window[0] <= delta_ms <= window[1]):
+                    if delta_ms > window[1]:
+                        missed = candidate
+                        del self._queue[idx]
+                        log.warning(
+                            "IR%d: Dropping missed detection: %s "
+                            "(delta=%.0fms > window[1]=%.0fms)",
+                            sensor_id, missed.fruit_color.value,
+                            delta_ms, window[1],
+                        )
+                        return
+
                     log.warning(
-                        "IR%d: Dropping missed detection: %s "
-                        "(delta=%.0fms > window[1]=%.0fms)",
-                        sensor_id, missed.fruit_color.value,
-                        delta_ms, window[1],
+                        "IR%d timing mismatch: delta=%.0fms, expected %.0f–%.0fms "
+                        "(keeping in queue)",
+                        sensor_id, delta_ms, window[0], window[1],
                     )
                     return
 
-                log.warning(
-                    "IR%d timing mismatch: delta=%.0fms, expected %.0f–%.0fms "
-                    "(keeping in queue)",
-                    sensor_id, delta_ms, window[0], window[1],
+                # Valid timing — take exclusive ownership of exactly this item
+                item = candidate
+                del self._queue[idx]
+                break
+            else:
+                log.debug(
+                    "IR%d triggered — no matching detection for this sensor",
+                    sensor_id,
                 )
                 return
-
-            # Valid timing — take exclusive ownership
-            item = self._queue.popleft()
         # ── Lock released ─────────────────────────────────────────────────
 
         self._dispatch(sensor_id, item)

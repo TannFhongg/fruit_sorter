@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from perception.fruit_detector import FruitDetector
+from shared.detection_result import FruitColor, SortAction
 
 
 def _cfg(mode: str = "production") -> dict:
@@ -76,7 +77,7 @@ def test_same_object_is_claimed_once_across_inference_frames():
     det = {"label": "GREEN", "confidence": 0.90, "bbox": (100, 120, 80, 80)}
 
     detector._frame_id = 1
-    assert detector._claim_new_object(det, capture_ts_ms=1000.0) is True
+    assert detector._claim_new_object(det, capture_ts_ms=1000.0) is False
 
     detector._frame_id = 2
     moved_same_fruit = {
@@ -84,7 +85,72 @@ def test_same_object_is_claimed_once_across_inference_frames():
         "confidence": 0.88,
         "bbox": (108, 122, 80, 80),
     }
-    assert detector._claim_new_object(moved_same_fruit, capture_ts_ms=1100.0) is False
+    assert detector._claim_new_object(moved_same_fruit, capture_ts_ms=1100.0) is True
+
+    detector._frame_id = 3
+    moved_after_enqueue = {
+        "label": "GREEN",
+        "confidence": 0.87,
+        "bbox": (116, 124, 80, 80),
+    }
+    assert detector._claim_new_object(moved_after_enqueue, capture_ts_ms=1200.0) is False
+
+
+def test_label_must_be_stable_before_detection_is_enqueued():
+    detector = _detector("simulation")
+
+    def claim_and_enqueue(det: dict, capture_ts_ms: float) -> bool:
+        if not detector._claim_new_object(det, capture_ts_ms):
+            return False
+
+        result = detector._build_result(det, capture_ts_ms)
+        assert result is not None
+        with detector.lock:
+            detector.queue.append(result)
+        return True
+
+    detector._frame_id = 1
+    red_first_frame = {
+        "label": "RED",
+        "confidence": 0.80,
+        "bbox": (100, 120, 80, 80),
+    }
+    assert claim_and_enqueue(red_first_frame, capture_ts_ms=1000.0) is False
+    assert list(detector.queue) == []
+
+    detector._frame_id = 2
+    green_first_frame = {
+        "label": "GREEN",
+        "confidence": 0.92,
+        "bbox": (106, 122, 80, 80),
+    }
+    assert claim_and_enqueue(green_first_frame, capture_ts_ms=1100.0) is False
+    assert list(detector.queue) == []
+
+    detector._frame_id = 3
+    green_second_frame = {
+        "label": "GREEN",
+        "confidence": 0.93,
+        "bbox": (112, 124, 80, 80),
+    }
+    assert claim_and_enqueue(green_second_frame, capture_ts_ms=1200.0) is True
+    assert len(detector.queue) == 1
+    result = detector.queue[0]
+    assert result.fruit_color == FruitColor.GREEN
+    assert result.action == SortAction.SERVO1_FIRE
+    assert result.confidence == 0.93
+    assert result.timestamp_ms == 1200.0
+    assert all(item.fruit_color != FruitColor.RED for item in detector.queue)
+    assert all(item.action != SortAction.PASS for item in detector.queue)
+
+    detector._frame_id = 4
+    green_after_enqueue = {
+        "label": "GREEN",
+        "confidence": 0.94,
+        "bbox": (118, 126, 80, 80),
+    }
+    assert claim_and_enqueue(green_after_enqueue, capture_ts_ms=1300.0) is False
+    assert len(detector.queue) == 1
 
 
 def test_same_frame_detections_are_ordered_downstream_first():
