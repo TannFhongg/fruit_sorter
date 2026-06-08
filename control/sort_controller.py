@@ -54,7 +54,7 @@ from collections import deque
 from drivers.serial_link import SerialLink
 from shared.detection_result import DetectionResult, SortAction
 from shared.event_bus import EVT_SORT_DONE, bus
-from shared.serial_protocol import cmd_sort, is_ir_trigger, parse_response
+from shared.serial_protocol import cmd_sort, is_ir_trigger
 
 log = logging.getLogger(__name__)
 
@@ -127,13 +127,12 @@ class SortController(threading.Thread):
     def run(self) -> None:
         log.info("SortController (T2) started — listening for IR triggers")
         while not self._stop.is_set():
-            raw = self._serial.read_line()
-            if not raw:
+            msg = self._serial.read_message()
+            if not msg:
                 time.sleep(0.001)
                 continue
 
-            msg = parse_response(raw)
-            if msg and is_ir_trigger(msg):
+            if is_ir_trigger(msg):
                 self._handle_ir_trigger(msg)
 
         log.info("SortController stopped")
@@ -185,32 +184,42 @@ class SortController(threading.Thread):
 
             candidate = self._queue[0]
             delta_ms  = now_ms - candidate.timestamp_ms
+            expected_servo_id = self._get_expected_servo(candidate)
+
+            # A fruit assigned to a downstream servo must pass upstream IR
+            # sensors without being consumed. Keep FIFO ownership until it
+            # reaches its expected station.
+            if expected_servo_id is not None:
+                if expected_servo_id > sensor_id:
+                    log.debug(
+                        "IR%d: %s expects SERVO%d downstream; keeping in queue "
+                        "(age=%.0fms)",
+                        sensor_id, candidate.fruit_color.value,
+                        expected_servo_id, delta_ms,
+                    )
+                    return
+
+                if expected_servo_id < sensor_id:
+                    missed = self._queue.popleft()
+                    log.error(
+                        "IR%d: %s expected SERVO%d upstream and reached IR%d. "
+                        "Dropping missed fruit.",
+                        sensor_id, missed.fruit_color.value,
+                        expected_servo_id, sensor_id,
+                    )
+                    return
 
             # ── Timing window check ───────────────────────────────────────
             if not (window[0] <= delta_ms <= window[1]):
                 if delta_ms > window[1]:
-                    # Too late — decide whether to drop
-                    should_drop = False
-                    if sensor_id == 1:
-                        should_drop = True
-                    else:
-                        all_earlier_missed = True
-                        for sid in range(1, sensor_id):
-                            earlier_window = self._windows.get(sid, (0, 9999))
-                            if delta_ms <= earlier_window[1]:
-                                all_earlier_missed = False
-                                break
-                        should_drop = all_earlier_missed
-
-                    if should_drop:
-                        missed = self._queue.popleft()
-                        log.warning(
-                            "IR%d: Dropping missed detection: %s "
-                            "(delta=%.0fms > window[1]=%.0fms)",
-                            sensor_id, missed.fruit_color.value,
-                            delta_ms, window[1],
-                        )
-                        return
+                    missed = self._queue.popleft()
+                    log.warning(
+                        "IR%d: Dropping missed detection: %s "
+                        "(delta=%.0fms > window[1]=%.0fms)",
+                        sensor_id, missed.fruit_color.value,
+                        delta_ms, window[1],
+                    )
+                    return
 
                 log.warning(
                     "IR%d timing mismatch: delta=%.0fms, expected %.0f–%.0fms "
@@ -222,17 +231,6 @@ class SortController(threading.Thread):
             # Valid timing — take exclusive ownership
             item = self._queue.popleft()
         # ── Lock released ─────────────────────────────────────────────────
-
-        # ── Sensor-servo mapping validation ───────────────────────────────
-        expected_servo_id = self._get_expected_servo(item)
-        if expected_servo_id is not None and expected_servo_id != sensor_id:
-            log.error(
-                "IR%d: Sensor-servo mismatch! %s expects SERVO%d but "
-                "triggered at IR%d. Fruit missed correct station. Dropping.",
-                sensor_id, item.fruit_color.value,
-                expected_servo_id, sensor_id,
-            )
-            return
 
         self._dispatch(sensor_id, item)
 
@@ -269,12 +267,19 @@ class SortController(threading.Thread):
             return_ms   = self._servo_return_ms.get(servo_id, 300)
 
             # Send SORT command with angle + timing — Arduino will execute the sweep asynchronously
-            ok     = self._serial.send(cmd_sort(servo_id, "fire", sweep_angle, sweep_ms, return_ms))
-            status = "OK" if ok else "SERIAL_ERR"
+            ok = self._serial.send(cmd_sort(servo_id, "fire", sweep_angle, sweep_ms, return_ms))
+            if not ok:
+                log.error(
+                    "IR%d: %s → SERVO%d command failed; not emitting sort-done "
+                    "or writing DB event",
+                    sensor_id, item.fruit_color.value, servo_id,
+                )
+                return
+
             log.info(
-                "IR%d: %s → SERVO%d SWEEP [angle=%d°] [%dms/%dms] [conf=%.2f] [%s]",
+                "IR%d: %s → SERVO%d SWEEP [angle=%d°] [%dms/%dms] [conf=%.2f] [OK]",
                 sensor_id, item.fruit_color.value,
-                servo_id, sweep_angle, sweep_ms, return_ms, item.confidence, status,
+                servo_id, sweep_angle, sweep_ms, return_ms, item.confidence,
             )
 
         bus.emit(

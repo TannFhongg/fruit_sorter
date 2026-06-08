@@ -65,6 +65,7 @@ import logging
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -194,6 +195,8 @@ class FruitDetector(threading.Thread):
         self._interp    = None
         self._input_wh: tuple[int, int] = (320, 320)
         self._transposed = True
+        self._system_mode = cfg.get("system", {}).get("mode", "production").lower()
+        self._simulation_enabled = self._system_mode == "simulation"
 
         m = cfg["model"]
         self._conf_thr = m["thresholds"]["confidence"]
@@ -220,7 +223,13 @@ class FruitDetector(threading.Thread):
     # ── Thread body ────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        self._load_model()
+        try:
+            self._load_model()
+        except RuntimeError as e:
+            log.critical("%s", e)
+            self.stop_event.set()
+            return
+
         cap     = self._open_camera()
         capture = _CaptureThread(cap, self.stop_event)
         capture.start()
@@ -338,24 +347,41 @@ class FruitDetector(threading.Thread):
     # ── Model loading ──────────────────────────────────────────────────────
 
     def _load_model(self) -> None:
-        import ncnn
+        if self._simulation_enabled:
+            log.warning("Simulation mode enabled; NCNN model loading is skipped")
+            self._interp = None
+            return
+
         model_dir  = self.cfg["model"]["path"]
         n_threads  = self.cfg["model"].get("num_threads", 4)
         param_path = f"{model_dir}/model.ncnn.param"
         bin_path   = f"{model_dir}/model.ncnn.bin"
         log.info("Loading NCNN model: %s", model_dir)
         try:
+            missing = [p for p in (param_path, bin_path) if not Path(p).is_file()]
+            if missing:
+                raise FileNotFoundError(f"Missing NCNN model file(s): {missing}")
+
+            import ncnn
             self._interp = ncnn.Net()
             self._interp.opt.use_vulkan_compute = False
             self._interp.opt.num_threads        = n_threads
-            self._interp.load_param(param_path)
-            self._interp.load_model(bin_path)
+            param_status = self._interp.load_param(param_path)
+            model_status = self._interp.load_model(bin_path)
+            if param_status not in (0, None) or model_status not in (0, None):
+                raise RuntimeError(
+                    "NCNN loader returned "
+                    f"load_param={param_status}, load_model={model_status}"
+                )
             w, h = self.cfg["model"]["input_size"]
             self._input_wh = (int(w), int(h))
             log.info("NCNN ready | input=%s | threads=%d", self._input_wh, n_threads)
         except Exception as e:
-            log.error("Model load failed: %s → simulation mode", e)
             self._interp = None
+            raise RuntimeError(
+                "Model load failed in "
+                f"{self._system_mode!r} mode; simulation is disabled"
+            ) from e
 
     # ── Camera open ────────────────────────────────────────────────────────
 
@@ -378,7 +404,10 @@ class FruitDetector(threading.Thread):
 
     def _run_inference(self, frame: np.ndarray) -> list[dict]:
         if self._interp is None:
-            return self._simulate()
+            if self._simulation_enabled:
+                return self._simulate()
+            log.error("Inference skipped: model is not loaded")
+            return []
 
         import ncnn
         W, H = self._input_wh

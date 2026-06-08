@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.loader import load_config
 from drivers.serial_link import SerialLink
-from shared.serial_protocol import parse_response, is_ir_trigger
+from shared.serial_protocol import is_ir_trigger
 
 
 def measure_sensor(
@@ -47,11 +47,11 @@ def measure_sensor(
         deadline  = time.monotonic() + 12.0
         triggered = False
         while time.monotonic() < deadline:
-            raw = serial.read_line()
-            if not raw:
+            msg = serial.read_message()
+            if not msg:
+                time.sleep(0.001)
                 continue
-            msg = parse_response(raw)
-            if msg and is_ir_trigger(msg) and msg.get("sensor") == sensor_id:
+            if is_ir_trigger(msg) and msg.get("sensor") == sensor_id:
                 delta_ms = time.monotonic() * 1000 - t_start
                 results.append(delta_ms)
                 print(f"  ✓  IR{sensor_id} triggered — delta_t = {delta_ms:.0f}ms")

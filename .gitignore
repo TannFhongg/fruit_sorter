@@ -15,7 +15,8 @@ dist/
 data/*.db
 data/*.db-journal
 data/*.db-wal
-
+models/
+*.pt
 # Không lưu Logs
 logs/*.log
 

@@ -79,6 +79,7 @@ def controller():
     serial_mock.is_connected = True
     serial_mock.send.return_value = True
     serial_mock.read_line.return_value = None
+    serial_mock.read_message.return_value = None
 
     q    = deque(maxlen=20)
     lock = threading.Lock()
@@ -216,6 +217,7 @@ class TestSweepDispatch:
         serial_mock.is_connected = True
         serial_mock.send.return_value = True
         serial_mock.read_line.return_value = None
+        serial_mock.read_message.return_value = None
 
         q    = deque(maxlen=20)
         lock = threading.Lock()
@@ -297,33 +299,50 @@ class TestSweepDispatch:
 
     def test_serial_failure_logged(self, controller):
         """
-        Nếu serial.send() trả False (lỗi kết nối), sort vẫn hoàn thành
-        (event bus và DB vẫn được cập nhật); chỉ log SERIAL_ERR.
+        Nếu serial.send() trả False (lỗi kết nối), không được ghi nhận
+        như đã sort thành công.
         """
         sc, q, _, dbq, serial = controller
         serial.send.return_value = False
         q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
-        # DB event vẫn được push dù serial fail
-        assert len(dbq) == 1
-        assert dbq[0].fruit_color == "GREEN"
+        serial.send.assert_called_once()
+        assert len(dbq) == 0
 
 
 # ── Sensor-servo mismatch ─────────────────────────────────────────────────
 
 class TestSensorServoMismatch:
 
-    def test_mismatch_drops_item(self, controller):
+    def test_downstream_servo_item_survives_upstream_ir(self, controller):
         """
-        SERVO2_FIRE ở IR1 → mismatch (IR1 phục vụ SERVO1).
-        Item bị drop, không gửi serial.
+        SERVO2_FIRE đi qua IR1 phải được giữ lại cho IR2.
         """
         sc, q, _, dbq, serial = controller
-        # SERVO2_FIRE nhưng IR1 trigger → expected_servo=2 ≠ sensor_id=1
         q.append(_make_det("YELLOW", 850, SortAction.SERVO2_FIRE))
+
         sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
         serial.send.assert_not_called()
-        assert len(dbq) == 0  # không push DB khi mismatch
+        assert len(q) == 1
+        assert len(dbq) == 0
+
+        q[0].timestamp_ms = time.monotonic() * 1000 - 1500
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 2})
+        assert serial.send.called
+        assert len(q) == 0
+        assert len(dbq) == 1
+
+    def test_upstream_servo_item_dropped_at_downstream_ir(self, controller):
+        """
+        SERVO1_FIRE tới IR2 nghĩa là đã lỡ trạm SERVO1; không ghi sort done.
+        """
+        sc, q, _, dbq, serial = controller
+        q.append(_make_det("GREEN", 1500, SortAction.SERVO1_FIRE))
+
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 2})
+        serial.send.assert_not_called()
+        assert len(q) == 0
+        assert len(dbq) == 0
 
 
 # ── DB queue ──────────────────────────────────────────────────────────────

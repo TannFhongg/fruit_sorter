@@ -36,6 +36,7 @@ import signal
 import sys
 import threading
 from collections import deque
+from pathlib import Path
 
 from config.loader import load_config
 from control.sort_controller import SortController
@@ -53,13 +54,15 @@ args = parser.parse_args()
 
 # ── Config & logging ───────────────────────────────────────────────────────
 cfg = load_config(args.config)
+log_file = Path(cfg["system"]["log_file"])
+log_file.parent.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.DEBUG if args.debug else logging.INFO,
     format="%(asctime)s [%(threadName)-16s] %(levelname)s — %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(cfg["system"]["log_file"], encoding="utf-8"),
+        logging.FileHandler(log_file, encoding="utf-8"),
     ],
 )
 log = logging.getLogger("main")
