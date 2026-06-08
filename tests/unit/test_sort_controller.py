@@ -149,6 +149,26 @@ class TestTimingGate:
         assert len(q) == 0          # item dropped (missed fruit)
         serial.send.assert_not_called()
 
+    def test_too_late_candidate_removed_then_later_valid_dispatches(self, controller):
+        """
+        Candidate đầu queue quá hạn phải bị xóa, rồi scan tiếp candidate hợp lệ
+        phía sau trong cùng IR trigger.
+        """
+        sc, q, _, dbq, serial = controller
+        q.append(_make_det("RED",   1200, SortAction.PASS))
+        q.append(_make_det("GREEN", 850,  SortAction.SERVO1_FIRE))
+
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+
+        import json
+        serial.send.assert_called_once()
+        call_bytes = serial.send.call_args[0][0]
+        cmd = json.loads(call_bytes.decode().strip())
+        assert cmd["servo"] == 1
+        assert len(q) == 0
+        assert len(dbq) == 1
+        assert dbq[0].fruit_color == "GREEN"
+
 
 # ── Sweep dispatch — lệnh gửi xuống Arduino ───────────────────────────────
 
@@ -373,6 +393,26 @@ class TestSensorServoMismatch:
         serial.send.assert_not_called()
         assert len(q) == 0
         assert len(dbq) == 0
+
+    def test_upstream_missed_drop_then_servo2_dispatches_same_trigger(self, controller):
+        """
+        IR2 phải drop SERVO1_FIRE đã miss trạm 1 rồi dispatch SERVO2_FIRE
+        phía sau trong cùng trigger.
+        """
+        sc, q, _, dbq, serial = controller
+        q.append(_make_det("GREEN",  1500, SortAction.SERVO1_FIRE))
+        q.append(_make_det("YELLOW", 1500, SortAction.SERVO2_FIRE))
+
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 2})
+
+        import json
+        serial.send.assert_called_once()
+        call_bytes = serial.send.call_args[0][0]
+        cmd = json.loads(call_bytes.decode().strip())
+        assert cmd["servo"] == 2
+        assert len(q) == 0
+        assert len(dbq) == 1
+        assert dbq[0].fruit_color == "YELLOW"
 
 
 # ── DB queue ──────────────────────────────────────────────────────────────

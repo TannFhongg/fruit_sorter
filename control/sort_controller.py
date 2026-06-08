@@ -182,7 +182,9 @@ class SortController(threading.Thread):
                 log.warning("IR%d triggered — queue empty after purge", sensor_id)
                 return
 
-            for idx, candidate in enumerate(self._queue):
+            idx = 0
+            while idx < len(self._queue):
+                candidate = self._queue[idx]
                 delta_ms  = now_ms - candidate.timestamp_ms
                 expected_servo_id = self._get_expected_servo(candidate)
 
@@ -197,6 +199,7 @@ class SortController(threading.Thread):
                             sensor_id, candidate.fruit_color.value,
                             expected_servo_id, delta_ms,
                         )
+                        idx += 1
                         continue
 
                     if expected_servo_id < sensor_id:
@@ -208,7 +211,7 @@ class SortController(threading.Thread):
                             sensor_id, missed.fruit_color.value,
                             expected_servo_id, sensor_id,
                         )
-                        return
+                        continue
 
                 # ── Timing window check ───────────────────────────────────
                 if not (window[0] <= delta_ms <= window[1]):
@@ -221,7 +224,7 @@ class SortController(threading.Thread):
                             sensor_id, missed.fruit_color.value,
                             delta_ms, window[1],
                         )
-                        return
+                        continue
 
                     log.warning(
                         "IR%d timing mismatch: delta=%.0fms, expected %.0f–%.0fms "
@@ -234,7 +237,8 @@ class SortController(threading.Thread):
                 item = candidate
                 del self._queue[idx]
                 break
-            else:
+
+            if item is None:
                 log.debug(
                     "IR%d triggered — no matching detection for this sensor",
                     sensor_id,
