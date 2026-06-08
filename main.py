@@ -81,7 +81,7 @@ db_write_queue  = deque(maxlen=200)
 #
 # No other module imports flask_app — the dependency arrow points only
 # inward (flask_app → event_bus), never outward.
-from web.flask_app import create_flask_app  # noqa: E402
+from web.flask_app import create_flask_app, set_health_sources  # noqa: E402
 flask_app, socketio = create_flask_app(cfg, db_write_queue, stop_event)
 
 
@@ -122,6 +122,12 @@ def main() -> None:
         stop_event=stop_event,
         name="DB-Writer",
         daemon=True,
+    )
+
+    set_health_sources(
+        serial_link=serial_link,
+        fruit_detector=fruit_detector,
+        db_writer=db_writer,
     )
 
     # ── Graceful shutdown ──────────────────────────────────────────────

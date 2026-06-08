@@ -63,3 +63,50 @@ def test_heartbeat_sends_ping_without_reading_uart():
 
     assert fake.writes == [cmd_ping()]
     assert link._awaiting_pong is True
+
+
+def test_reconnect_stops_after_configured_failed_attempts(monkeypatch):
+    cfg = _cfg()
+    cfg["arduino"]["serial"]["reconnect_delay_s"] = 0
+    cfg["arduino"]["serial"]["reconnect_max"] = 3
+    link = SerialLink(cfg, threading.Event())
+
+    attempts = 0
+
+    def fail_connect() -> bool:
+        nonlocal attempts
+        attempts += 1
+        return False
+
+    monkeypatch.setattr(link, "_try_connect", fail_connect)
+
+    link.run()
+
+    assert attempts == 3
+
+
+def test_reconnect_success_on_last_attempt_does_not_exit_as_failure(monkeypatch, caplog):
+    cfg = _cfg()
+    cfg["arduino"]["serial"]["reconnect_delay_s"] = 0
+    cfg["arduino"]["serial"]["reconnect_max"] = 3
+    stop = threading.Event()
+    link = SerialLink(cfg, stop)
+
+    attempts = 0
+
+    def connect_on_third_attempt() -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 3:
+            with link._state_lock:
+                link._connected = True
+            stop.set()
+            return True
+        return False
+
+    monkeypatch.setattr(link, "_try_connect", connect_on_third_attempt)
+
+    link.run()
+
+    assert attempts == 3
+    assert "Max serial reconnect attempts" not in caplog.text

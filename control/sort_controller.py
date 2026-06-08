@@ -52,7 +52,7 @@ import time
 from collections import deque
 
 from drivers.serial_link import SerialLink
-from shared.detection_result import DetectionResult, SortAction
+from shared.detection_result import DetectionResult, SortAction, SortEvent
 from shared.event_bus import EVT_SORT_DONE, bus
 from shared.serial_protocol import cmd_sort, is_ir_trigger
 
@@ -282,28 +282,37 @@ class SortController(threading.Thread):
                 servo_id, sweep_angle, sweep_ms, return_ms, item.confidence,
             )
 
+        sort_event = self._build_sort_event(
+            item,
+            sensor_id,
+            (item.action == SortAction.REJECT),
+        )
         bus.emit(
             EVT_SORT_DONE,
-            fruit_color=item.fruit_color.value,
-            is_reject=(item.action == SortAction.REJECT),
+            fruit_color=sort_event.fruit_color,
+            confidence=sort_event.confidence,
+            action=sort_event.action,
+            station=sort_event.station,
+            is_reject=sort_event.is_reject,
+            ts_ms=sort_event.sorted_at_ms,
         )
-        self._push_db_event(item, sensor_id, (item.action == SortAction.REJECT))
+        self._push_db_event(sort_event)
 
     # ── DB event ───────────────────────────────────────────────────────────
 
-    def _push_db_event(
+    def _build_sort_event(
         self,
         item: DetectionResult,
         station: int,
         is_reject: bool,
-    ) -> None:
-        from shared.detection_result import SortEvent  # local import — avoids cycle
-        self._db_queue.append(
-            SortEvent(
-                fruit_color=item.fruit_color.value,
-                confidence=item.confidence,
-                action=item.action.value,
-                station=station,
-                is_reject=is_reject,
-            )
+    ) -> SortEvent:
+        return SortEvent(
+            fruit_color=item.fruit_color.value,
+            confidence=item.confidence,
+            action=item.action.value,
+            station=station,
+            is_reject=is_reject,
         )
+
+    def _push_db_event(self, event: SortEvent) -> None:
+        self._db_queue.append(event)

@@ -371,6 +371,30 @@ class TestDbQueue:
         assert ev.action      == "SERVO1_FIRE"
         assert ev.is_reject   is False
 
+    def test_sort_done_event_contains_dashboard_payload(self, controller):
+        """EVT_SORT_DONE phải đủ field để Flask emit sort_event live."""
+        from shared.event_bus import EVT_SORT_DONE, bus
+
+        sc, q, _, _, _ = controller
+        received = []
+
+        bus.clear(EVT_SORT_DONE)
+        bus.subscribe(EVT_SORT_DONE, lambda **payload: received.append(payload))
+        try:
+            q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
+            sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+        finally:
+            bus.clear(EVT_SORT_DONE)
+
+        assert len(received) == 1
+        payload = received[0]
+        assert payload["fruit_color"] == "GREEN"
+        assert payload["confidence"] == pytest.approx(0.92)
+        assert payload["action"] == "SERVO1_FIRE"
+        assert payload["station"] == 1
+        assert payload["is_reject"] is False
+        assert payload["ts_ms"] > 1_577_836_800_000
+
 
 # ── Queue purge ───────────────────────────────────────────────────────────
 

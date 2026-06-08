@@ -42,7 +42,13 @@ async function loadBootstrapData() {
     const r = await fetch('/api/stats/today');
     if (!r.ok) return;
     const d = await r.json();
-    applyStats({ GREEN: d.green||0, RED: d.red||0, YELLOW: d.yellow||0, rejects: d.rejects||0 });
+    applyStats({
+      GREEN: d.green || 0,
+      RED: d.red || 0,
+      YELLOW: d.yellow || 0,
+      rejects: d.rejects || 0,
+      total: d.total,
+    });
   } catch {}
 
   try {
@@ -63,7 +69,9 @@ function applyStats(data) {
   const r   = data.RED     || 0;
   const y   = data.YELLOW  || 0;
   const rej = data.rejects || 0;
-  const tot = g + r + y;
+  const accepted = g + r + y;
+  const reportedTotal = Number(data.total);
+  const tot = Number.isFinite(reportedTotal) ? reportedTotal : accepted + rej;
 
   setCard('cnt-green',  g, 'sub-green',  prev.GREEN);
   setCard('cnt-red',    r, 'sub-red',    prev.RED);
@@ -71,7 +79,7 @@ function applyStats(data) {
 
   $('cnt-total').textContent  = tot;
   $('sub-reject').textContent = tot > 0
-    ? `Reject ${Math.round(rej / (tot + rej) * 100)}%`
+    ? `Reject ${Math.round(rej / tot * 100)}%`
     : 'Reject 0%';
 
   $('sb-green').textContent   = g;
@@ -79,7 +87,7 @@ function applyStats(data) {
   $('sb-yellow').textContent  = y;
   $('sb-rejects').textContent = rej;
 
-  updateDonut(g, r, y, tot);
+  updateDonut(g, r, y, accepted);
 
   $('last-update').textContent = 'Updated ' +
     new Date().toLocaleTimeString('vi-VN', { hour12: false });
@@ -144,16 +152,20 @@ function setCamOnline(online) {
   }
 }
 
-// Kiểm tra server health mỗi 3 giây
-// Nếu /api/health trả về ok → stream đang chạy bình thường
+async function fetchHealth(timeoutMs = 2000) {
+  const r = await fetch('/api/health', { signal: AbortSignal.timeout(timeoutMs) });
+  return await r.json();
+}
+
+function healthCameraOnline(health) {
+  return health?.components?.camera?.status === 'ok';
+}
+
+// Kiểm tra camera health mỗi 3 giây.
+// Health tổng thể có thể fail vì serial/DB, nên chỉ dùng component camera.
 setInterval(async () => {
   try {
-    const r = await fetch('/api/health', { signal: AbortSignal.timeout(2000) });
-    if (r.ok) {
-      setCamOnline(true);
-    } else {
-      setCamOnline(false);
-    }
+    setCamOnline(healthCameraOnline(await fetchHealth()));
   } catch {
     setCamOnline(false);
   }
@@ -184,10 +196,10 @@ function handleCamLoad() {
 
 // Khi img thực sự lỗi (ví dụ 404, network error) — không phải do MJPEG
 function handleCamError() {
-  // Chỉ set offline nếu health check cũng fail
+  // Chỉ set offline nếu camera health cũng fail
   // (tránh false negative do browser quirk với MJPEG)
-  fetch('/api/health', { signal: AbortSignal.timeout(1000) })
-    .then(r => { if (!r.ok) setCamOnline(false); })
+  fetchHealth(1000)
+    .then(health => { if (!healthCameraOnline(health)) setCamOnline(false); })
     .catch(() => setCamOnline(false));
 }
 

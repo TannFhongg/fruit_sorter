@@ -102,6 +102,8 @@ conveyor:
   speed_m_s: 0.30            # Đo thực tế bằng tools/calibrate_belt.py
   camera_to_ir1_m: 0.25      # Khoảng cách camera → IR1
   camera_to_ir2_m: 0.45      # Khoảng cách camera → IR2
+  image_flow_axis: "x"        # Trục băng chuyền trong ảnh: "x" hoặc "y"
+  image_flow_direction: "left_to_right" # Hướng quả đi tới IR trong ảnh
 
   timing:
     tolerance_pct: 20        # ±20% cửa sổ thời gian hợp lệ
@@ -124,6 +126,11 @@ model:
     confidence: 0.65
     iou_nms: 0.45
     min_bbox_area: 1500
+
+  tracking:
+    ttl_ms: 600               # Giữ track khi quả tạm mất bbox giữa các frame
+    iou_threshold: 0.35       # Match cùng object bằng overlap bbox
+    center_distance_px: 76    # Fallback match bằng khoảng cách tâm bbox
 
   labels:
     0: "GREEN"

@@ -69,3 +69,32 @@ def test_simulation_requires_explicit_simulation_mode():
     assert detector._run_inference(frame) == [
         {"label": "GREEN", "confidence": 0.8, "bbox": (0, 0, 10, 10)}
     ]
+
+
+def test_same_object_is_claimed_once_across_inference_frames():
+    detector = _detector("simulation")
+    det = {"label": "GREEN", "confidence": 0.90, "bbox": (100, 120, 80, 80)}
+
+    detector._frame_id = 1
+    assert detector._claim_new_object(det, capture_ts_ms=1000.0) is True
+
+    detector._frame_id = 2
+    moved_same_fruit = {
+        "label": "GREEN",
+        "confidence": 0.88,
+        "bbox": (108, 122, 80, 80),
+    }
+    assert detector._claim_new_object(moved_same_fruit, capture_ts_ms=1100.0) is False
+
+
+def test_same_frame_detections_are_ordered_downstream_first():
+    detector = _detector("simulation")
+    detections = [
+        {"label": "GREEN", "confidence": 0.95, "bbox": (40, 50, 50, 50)},
+        {"label": "YELLOW", "confidence": 0.70, "bbox": (250, 50, 50, 50)},
+        {"label": "RED", "confidence": 0.85, "bbox": (150, 50, 50, 50)},
+    ]
+
+    ordered = detector._order_detections_for_queue(detections)
+
+    assert [d["label"] for d in ordered] == ["YELLOW", "RED", "GREEN"]

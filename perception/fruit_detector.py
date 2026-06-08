@@ -65,6 +65,7 @@ import logging
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -101,6 +102,43 @@ def _nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> list[int]:
         iou   = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
         order = order[1:][iou <= iou_thr]
     return keep
+
+
+def _bbox_center(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
+    x, y, w, h = bbox
+    return x + (w / 2), y + (h / 2)
+
+
+def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+
+    inter_w = max(0, min(ax2, bx2) - max(ax, bx))
+    inter_h = max(0, min(ay2, by2) - max(ay, by))
+    inter = inter_w * inter_h
+    if inter == 0:
+        return 0.0
+
+    union = (aw * ah) + (bw * bh) - inter
+    return float(inter / max(union, 1))
+
+
+def _center_distance(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax, ay = _bbox_center(a)
+    bx, by = _bbox_center(b)
+    return float(((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5)
+
+
+@dataclass
+class _ObjectTrack:
+    track_id: int
+    label: str
+    bbox: tuple[int, int, int, int]
+    last_seen_frame_id: int
+    last_seen_ts_ms: float
+    enqueued: bool = False
 
 
 # ── Internal capture thread ────────────────────────────────────────────────
@@ -197,6 +235,10 @@ class FruitDetector(threading.Thread):
         self._transposed = True
         self._system_mode = cfg.get("system", {}).get("mode", "production").lower()
         self._simulation_enabled = self._system_mode == "simulation"
+        self._model_loaded = False
+        self._model_error: str | None = None
+        self._camera_opened = False
+        self._camera_error: str | None = None
 
         m = cfg["model"]
         self._conf_thr = m["thresholds"]["confidence"]
@@ -215,6 +257,33 @@ class FruitDetector(threading.Thread):
         self._skip_n       = cfg.get("model", {}).get("frame_skip", 2)
         self._skip_counter = 0
 
+        tracking = cfg.get("model", {}).get("tracking", {})
+        self._track_ttl_ms = float(tracking.get("ttl_ms", 600.0))
+        self._track_iou_thr = float(tracking.get("iou_threshold", 0.35))
+        self._track_center_dist_px = float(
+            tracking.get("center_distance_px", max(self._cam_w, self._cam_h) * 0.12)
+        )
+        self._tracks: dict[int, _ObjectTrack] = {}
+        self._next_track_id = 1
+
+        conveyor = cfg.get("conveyor", {})
+        queue_order = conveyor.get("queue_order", {})
+        self._queue_order_axis = str(
+            queue_order.get("axis", conveyor.get("image_flow_axis", "x"))
+        ).lower()
+        self._queue_order_direction = str(
+            queue_order.get(
+                "direction",
+                conveyor.get("image_flow_direction", "left_to_right"),
+            )
+        ).lower()
+        if self._queue_order_axis not in ("x", "y"):
+            log.warning(
+                "Invalid conveyor queue_order.axis=%r; falling back to 'x'",
+                self._queue_order_axis,
+            )
+            self._queue_order_axis = "x"
+
         # _last_dets: cached for OVERLAY DRAWING only.
         # NEVER used to push into the detection queue on non-inference frames.
         # See module docstring for the full explanation.
@@ -230,7 +299,13 @@ class FruitDetector(threading.Thread):
             self.stop_event.set()
             return
 
-        cap     = self._open_camera()
+        try:
+            cap = self._open_camera()
+        except RuntimeError as e:
+            log.critical("%s", e)
+            self.stop_event.set()
+            return
+
         capture = _CaptureThread(cap, self.stop_event)
         capture.start()
 
@@ -321,15 +396,22 @@ class FruitDetector(threading.Thread):
                 ran_inference      = True
 
             if ran_inference:
-                # Enqueue detections ONLY on inference frames
-                for det in self._last_dets:
-                    # Pass capture timestamp to _build_result
+                # Enqueue detections ONLY on inference frames, in physical
+                # downstream-first order instead of NMS/confidence order.
+                for det in self._order_detections_for_queue(self._last_dets):
+                    bus.emit(
+                        EVT_DETECTION,
+                        label=det["label"],
+                        confidence=det["confidence"],
+                    )
+
+                    if not self._claim_new_object(det, capture_ts_ms):
+                        continue
+
                     result = self._build_result(det, capture_ts_ms)
                     if result:
                         with self.lock:
                             self.queue.append(result)
-                        # Publish detection event → flask_app pushes to dashboard
-                        bus.emit(EVT_DETECTION, label=det["label"], confidence=det["confidence"])
 
             elapsed = time.monotonic() - t0
             cycle_times.append(elapsed)
@@ -342,6 +424,7 @@ class FruitDetector(threading.Thread):
                 )
 
         cap.release()
+        self._camera_opened = False
         log.info("FruitDetector stopped")
 
     # ── Model loading ──────────────────────────────────────────────────────
@@ -350,6 +433,8 @@ class FruitDetector(threading.Thread):
         if self._simulation_enabled:
             log.warning("Simulation mode enabled; NCNN model loading is skipped")
             self._interp = None
+            self._model_loaded = True
+            self._model_error = None
             return
 
         model_dir  = self.cfg["model"]["path"]
@@ -375,9 +460,13 @@ class FruitDetector(threading.Thread):
                 )
             w, h = self.cfg["model"]["input_size"]
             self._input_wh = (int(w), int(h))
+            self._model_loaded = True
+            self._model_error = None
             log.info("NCNN ready | input=%s | threads=%d", self._input_wh, n_threads)
         except Exception as e:
             self._interp = None
+            self._model_loaded = False
+            self._model_error = str(e)
             raise RuntimeError(
                 "Model load failed in "
                 f"{self._system_mode!r} mode; simulation is disabled"
@@ -393,7 +482,11 @@ class FruitDetector(threading.Thread):
         cap.set(cv2.CAP_PROP_BUFFERSIZE,   self._cam_buf)
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         if not cap.isOpened():
+            self._camera_opened = False
+            self._camera_error = f"Cannot open camera {self._cam_idx}"
             raise RuntimeError(f"Cannot open camera {self._cam_idx}")
+        self._camera_opened = True
+        self._camera_error = None
         log.info(
             "Camera: %d×%d @ %.0ffps",
             self._cam_w, self._cam_h, cap.get(cv2.CAP_PROP_FPS),
@@ -518,6 +611,139 @@ class FruitDetector(threading.Thread):
             action=action,
             timestamp_ms=capture_ts_ms,  # Use capture time, not current time
         )
+
+    def health_status(self) -> dict:
+        """Return a thread-safe-enough snapshot for /api/health."""
+        if self._model_loaded:
+            model_status = "ok"
+        elif self._model_error:
+            model_status = "error"
+        else:
+            model_status = "starting"
+
+        if self._camera_opened:
+            camera_status = "ok"
+        elif self._camera_error:
+            camera_status = "error"
+        else:
+            camera_status = "starting"
+
+        with self.lock:
+            queue_depth = len(self.queue)
+
+        return {
+            "model": {
+                "status": model_status,
+                "loaded": self._model_loaded,
+                "simulation": self._simulation_enabled,
+                "error": self._model_error,
+            },
+            "camera_device": {
+                "status": camera_status,
+                "opened": self._camera_opened,
+                "device_index": self._cam_idx,
+                "error": self._camera_error,
+            },
+            "frames_processed": self._frame_id,
+            "queue_depth": queue_depth,
+            "active_tracks": len(self._tracks),
+        }
+
+    def _claim_new_object(self, det: dict, capture_ts_ms: float) -> bool:
+        """
+        Return True only the first time a physical object is seen.
+
+        Inference runs on several frames while the same fruit remains in view.
+        This lightweight tracker matches detections by bbox overlap/center
+        movement and marks the track as already enqueued after the first claim.
+        """
+        self._expire_tracks(capture_ts_ms)
+
+        bbox = det["bbox"]
+        track = self._match_track(bbox)
+        if track is None:
+            track = _ObjectTrack(
+                track_id=self._next_track_id,
+                label=det["label"],
+                bbox=bbox,
+                last_seen_frame_id=self._frame_id,
+                last_seen_ts_ms=capture_ts_ms,
+            )
+            self._tracks[track.track_id] = track
+            self._next_track_id += 1
+        else:
+            track.label = det["label"]
+            track.bbox = bbox
+            track.last_seen_frame_id = self._frame_id
+            track.last_seen_ts_ms = capture_ts_ms
+
+        if track.enqueued:
+            log.debug(
+                "Skipping duplicate detection for track=%d label=%s bbox=%s",
+                track.track_id, det["label"], bbox,
+            )
+            return False
+
+        track.enqueued = True
+        return True
+
+    def _expire_tracks(self, capture_ts_ms: float) -> None:
+        expired = [
+            track_id
+            for track_id, track in self._tracks.items()
+            if (capture_ts_ms - track.last_seen_ts_ms) > self._track_ttl_ms
+        ]
+        for track_id in expired:
+            self._tracks.pop(track_id, None)
+
+    def _match_track(self, bbox: tuple[int, int, int, int]) -> _ObjectTrack | None:
+        best_track: _ObjectTrack | None = None
+        best_score = -1.0
+
+        for track in self._tracks.values():
+            if track.last_seen_frame_id == self._frame_id:
+                continue
+
+            iou = _bbox_iou(bbox, track.bbox)
+            dist = _center_distance(bbox, track.bbox)
+            max_box_extent = max(bbox[2], bbox[3], track.bbox[2], track.bbox[3])
+            dist_limit = max(self._track_center_dist_px, max_box_extent * 0.75)
+
+            if iou < self._track_iou_thr and dist > dist_limit:
+                continue
+
+            score = iou + max(0.0, 1.0 - (dist / max(dist_limit, 1.0))) * 0.25
+            if score > best_score:
+                best_score = score
+                best_track = track
+
+        return best_track
+
+    def _order_detections_for_queue(self, detections: list[dict]) -> list[dict]:
+        """
+        Sort same-frame detections by conveyor physics, downstream first.
+
+        YOLO/NMS returns detections in confidence order. The control thread is
+        FIFO, so the queue must represent belt order: fruit closest to the IR
+        station must be consumed first.
+        """
+        if len(detections) <= 1:
+            return list(detections)
+
+        increasing_downstream = self._queue_order_direction in {
+            "left_to_right",
+            "top_to_bottom",
+            "increasing",
+            "positive",
+            "right",
+            "down",
+        }
+
+        def position(det: dict) -> float:
+            cx, cy = _bbox_center(det["bbox"])
+            return cx if self._queue_order_axis == "x" else cy
+
+        return sorted(detections, key=position, reverse=increasing_downstream)
 
     def _simulate(self) -> list[dict]:
         import random

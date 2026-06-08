@@ -137,4 +137,4 @@ bus: EventBus = EventBus()
 #
 EVT_FRAME      = "frame"       # payload: jpeg_bytes: bytes
 EVT_DETECTION  = "detection"   # payload: label: str, confidence: float
-EVT_SORT_DONE  = "sort_done"   # payload: fruit_color: str, is_reject: bool
+EVT_SORT_DONE  = "sort_done"   # payload: fruit_color/confidence/action/station/is_reject/ts_ms

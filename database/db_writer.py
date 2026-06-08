@@ -94,6 +94,11 @@ ON CONFLICT(date) DO UPDATE SET
     total   = total   + excluded.total"""
 
 
+def _local_date_from_ms(timestamp_ms: float) -> str:
+    """Return the local calendar date for an event wall-clock timestamp."""
+    return datetime.fromtimestamp(timestamp_ms / 1000).strftime("%Y-%m-%d")
+
+
 class DatabaseWriter(threading.Thread):
 
     def __init__(self, cfg: dict, write_queue: deque, stop_event: threading.Event, **kw):
@@ -107,6 +112,9 @@ class DatabaseWriter(threading.Thread):
         self._queue      = write_queue
         self._stop_flag  = stop_event
         self._conn: sqlite3.Connection | None = None
+        self._last_error: str | None = None
+        self._last_flush_ok_ts: float = 0.0
+        self._dropped_batches = 0
 
     def run(self) -> None:
         self._conn = self._connect()
@@ -139,6 +147,8 @@ class DatabaseWriter(threading.Thread):
         for attempt in range(1, _MAX_FLUSH_RETRIES + 1):
             try:
                 self._write_batch(batch)
+                self._last_error = None
+                self._last_flush_ok_ts = time.time()
                 log.debug("DB flush: %d events (attempt %d)", len(batch), attempt)
                 return  # ← success: exit retry loop immediately
 
@@ -162,9 +172,28 @@ class DatabaseWriter(threading.Thread):
                         "Investigate: path=%s  error=%s",
                         _MAX_FLUSH_RETRIES, len(batch), self._path, exc,
                     )
+                    self._last_error = str(exc)
+                    self._dropped_batches += 1
                     # Intentionally do NOT re-enqueue.
                     # The queue remains healthy; new events continue
                     # to accumulate so the sorter keeps running.
+
+    def health_status(self) -> dict:
+        if self._last_error:
+            status = "error"
+        elif self._conn is None:
+            status = "starting"
+        else:
+            status = "ok"
+
+        return {
+            "status": status,
+            "path": self._path,
+            "queue_depth": len(self._queue),
+            "last_error": self._last_error,
+            "last_flush_ok_ts": self._last_flush_ok_ts,
+            "dropped_batches": self._dropped_batches,
+        }
 
     def _write_batch(self, batch: list) -> None:
         """Execute one atomic SQLite transaction for the given batch.
@@ -175,20 +204,34 @@ class DatabaseWriter(threading.Thread):
              e.station, int(e.is_reject), e.sorted_at_ms)
             for e in batch
         ]
-        today   = datetime.now().strftime("%Y-%m-%d")
-        counts  = Counter(e.fruit_color for e in batch if not e.is_reject)
-        rejects = sum(1 for e in batch if e.is_reject)
+        stats_by_date: dict[str, Counter] = {}
+        for event in batch:
+            counts = stats_by_date.setdefault(
+                _local_date_from_ms(event.sorted_at_ms),
+                Counter(),
+            )
+            if event.is_reject:
+                counts["rejects"] += 1
+            else:
+                counts[event.fruit_color] += 1
+            counts["total"] += 1
 
         with self._conn:
             self._conn.executemany(_SQL_INSERT, rows)
-            self._conn.execute(_SQL_UPSERT, (
-                today,
-                counts.get("GREEN",  0),
-                counts.get("RED",    0),
-                counts.get("YELLOW", 0),
-                rejects,
-                len(batch),
-            ))
+            self._conn.executemany(
+                _SQL_UPSERT,
+                [
+                    (
+                        day,
+                        counts.get("GREEN",  0),
+                        counts.get("RED",    0),
+                        counts.get("YELLOW", 0),
+                        counts.get("rejects", 0),
+                        counts.get("total",   0),
+                    )
+                    for day, counts in stats_by_date.items()
+                ],
+            )
 
     def _connect(self) -> sqlite3.Connection:
         p = Path(self._path)

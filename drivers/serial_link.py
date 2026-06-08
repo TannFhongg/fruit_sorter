@@ -138,20 +138,20 @@ class SerialLink(threading.Thread):
     # ── Thread body ────────────────────────────────────────────────────────
 
     def run(self) -> None:
-        retries = 0
+        failed_reconnects = 0
         while not self._stop.is_set():
             if not self.is_connected:
-                if self._try_connect():
-                    retries = 0
-                    continue
-                retries += 1
-                if retries > self._max_retry:
+                if failed_reconnects >= self._max_retry:
                     log.critical(
                         "Max serial reconnect attempts — Arduino unavailable. "
                         "SerialLink thread exiting (camera & web still running)."
                     )
                     self._cleanup()
                     return
+                if self._try_connect():
+                    failed_reconnects = 0
+                    continue
+                failed_reconnects += 1
                 time.sleep(self._delay)
             else:
                 raw = self._read_raw_line()

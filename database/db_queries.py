@@ -4,8 +4,12 @@ Read-only SQL queries cho Flask API endpoints.
 """
 
 from __future__ import annotations
+
+import logging
 import sqlite3
 from datetime import datetime, timedelta
+
+log = logging.getLogger(__name__)
 
 
 def _conn(path: str) -> sqlite3.Connection:
@@ -23,8 +27,9 @@ def get_today_stats(path: str) -> dict:
                 (today,)
             ).fetchone()
         return dict(row) if row else {}
-    except Exception:
-        return {}
+    except sqlite3.Error:
+        log.exception("DB query failed: today_stats path=%s date=%s", path, today)
+        raise
 
 
 def get_history(path: str, days: int = 7) -> list[dict]:
@@ -36,8 +41,9 @@ def get_history(path: str, days: int = 7) -> list[dict]:
                 "WHERE date>=? ORDER BY date ASC", (since,)
             ).fetchall()
         return [dict(r) for r in rows]
-    except Exception:
-        return []
+    except sqlite3.Error:
+        log.exception("DB query failed: history path=%s since=%s", path, since)
+        raise
 
 
 def get_recent_events(path: str, limit: int = 50) -> list[dict]:
@@ -48,8 +54,9 @@ def get_recent_events(path: str, limit: int = 50) -> list[dict]:
                 "FROM sort_events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
-    except Exception:
-        return []
+    except sqlite3.Error:
+        log.exception("DB query failed: recent_events path=%s limit=%s", path, limit)
+        raise
 
 
 def get_hourly_breakdown(path: str) -> list[dict]:
@@ -66,5 +73,6 @@ def get_hourly_breakdown(path: str) -> list[dict]:
                 GROUP BY hour,fruit_color ORDER BY hour
             """, (today,)).fetchall()
         return [dict(r) for r in rows]
-    except Exception:
-        return []
+    except sqlite3.Error:
+        log.exception("DB query failed: hourly_breakdown path=%s date=%s", path, today)
+        raise
