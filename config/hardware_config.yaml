@@ -1,178 +1,138 @@
-# =============================================================================
-#  config/hardware_config.yaml
-#  Cấu hình phần cứng & hệ thống — FruitSorter
-#  Chỉnh sửa file này, KHÔNG hardcode trong code
-# =============================================================================
-
-# ---------------------------------------------------------------------------
-# SYSTEM
-# ---------------------------------------------------------------------------
-system:
-  name: "FruitSorter v3.0"
-  mode: "production"        # "production" | "debug" | "simulation"
-  log_level: "INFO"
-  log_file: "logs/sorter.log"
-  timezone: "Asia/Ho_Chi_Minh"
-  queue_maxlen: 20           # Detection queue size (drop oldest khi tràn)
-
-# ---------------------------------------------------------------------------
-# WEB SERVER (Flask + SocketIO)
-# ---------------------------------------------------------------------------
-web:
-  host: "0.0.0.0"
-  port: 5000
-  secret_key: "fruit-sorter-secret-2025"
-  socketio_async_mode: "threading"
-  cors_allowed_origins: "*"
-
-# ---------------------------------------------------------------------------
-# CAMERA (USB Camera qua OpenCV — trên RPi 4)
-# ---------------------------------------------------------------------------
-camera:
-  device_index: 0            # /dev/video0
-  width: 640
-  height: 480
-  fps: 30
-  buffer_size: 2             # OpenCV buffer nhỏ → giảm latency
-
-# ---------------------------------------------------------------------------
-# ARDUINO SLAVE — UART Serial
-# ---------------------------------------------------------------------------
-arduino:
-  serial:
-    port: "/dev/ttyUSB0"     # Kiểm tra: ls /dev/ttyUSB* hoặc /dev/ttyACM*
-    baudrate: 115200
-    timeout_s: 1.0
-    reconnect_delay_s: 3.0
-    reconnect_max: 10
-
-  heartbeat:
-    interval_s: 5
-    max_missed: 3            # Cảnh báo + dừng băng sau N lần miss
-
-# ---------------------------------------------------------------------------
-# HARDWARE PINS — chân Arduino (KHÔNG phải BCM của RPi)
-# ---------------------------------------------------------------------------
-hardware:
-  ir_sensors:
-    ir1:
-      pin: 2                 # Arduino digital pin 2 (interrupt)
-      label: "station_green"     # Vị trí trước servo 1
-      debounce_ms: 20
-    ir2:
-      pin: 3                 # Arduino digital pin 3 (interrupt)
-      label: "station_yellow"    # Vị trí trước servo 2
-      debounce_ms: 20
-
-  servos:
-    # -----------------------------------------------------------------------
-    # SWEEP mechanism (v3.0) — MG996R
-    # -----------------------------------------------------------------------
-    # angle_home  : resting position (parallel to belt — no obstruction)
-    # angle_sweep : maximum sweep angle; flap "slaps" fruit sideways
-    #
-    # Physical sequence:
-    #   1. Flap at angle_home (0°) — fruit passes freely
-    #   2. SORT command arrives → servo sweeps to angle_sweep (120°)
-    #      in ~200 ms (MG996R no-load speed: ~0.14 s/60° @ 6V)
-    #   3. Flap edge strikes fruit mid-sweep, deflects it off belt
-    #   4. After sweep_duration_ms, servo returns to angle_home
-    #      (return_duration_ms gives time for flap to clear the belt)
-    # -----------------------------------------------------------------------
-    servo1:
-      pin: 9                 # Arduino PWM pin 9
-      label: "flap_green"
-      angle_home: 0          # resting — parallel to belt
-      angle_sweep: 120       # sweep angle — strikes fruit sideways
-      sweep_duration_ms: 200 # time to hold swept position (ms)
-      return_duration_ms: 300 # time for return stroke before idle (ms)
-
-    servo2:
-      pin: 10                # Arduino PWM pin 10
-      label: "flap_yellow"
-      angle_home: 0
-      angle_sweep: 120
-      sweep_duration_ms: 200
-      return_duration_ms: 300
-
-# ---------------------------------------------------------------------------
-# CONVEYOR — băng chuyền
-# ---------------------------------------------------------------------------
-conveyor:
-  speed_m_s: 0.30            # Đo thực tế bằng tools/calibrate_belt.py
-  camera_to_ir1_m: 0.25      # Khoảng cách camera → IR1
-  camera_to_ir2_m: 0.45      # Khoảng cách camera → IR2
-  image_flow_axis: "x"        # Trục băng chuyền trong ảnh: "x" hoặc "y"
-  image_flow_direction: "left_to_right" # Hướng quả đi tới IR trong ảnh
-
-  timing:
-    tolerance_pct: 20        # ±20% cửa sổ thời gian hợp lệ
-    # Tự tính từ speed + distance. Ghi đè nếu cần:
-    # ir1_window_ms: [700, 1000]
-    # ir2_window_ms: [1200, 1800]
-
-# ---------------------------------------------------------------------------
-# AI MODEL — YOLO Fruit Detection
-# ---------------------------------------------------------------------------
-model:
-  path: "models/best_ncnn_model"
-  type: "ncnn"
-  input_size: [320, 320]
-  num_threads: 4
-  frame_skip: 3
-  use_gpu: false
-
-  thresholds:
-    confidence: 0.65
-    iou_nms: 0.45
-    min_bbox_area: 1500
-
-  tracking:
-    ttl_ms: 600               # Giữ track khi quả tạm mất bbox giữa các frame
-    iou_threshold: 0.35       # Match cùng object bằng overlap bbox
-    center_distance_px: 76    # Fallback match bằng khoảng cách tâm bbox
-
-  labels:
-    0: "GREEN"
-    1: "RED"
-    2: "YELLOW"
-
-  label_colors:
-    GREEN:  [0, 200, 50]
-    RED:    [0, 50, 220]
-    YELLOW: [0, 210, 255]
-
-  routing:
-    GREEN:   { servo: 1, direction: "fire"  }
-    RED:     { servo: null, direction: "pass"  }
-    YELLOW:  { servo: 2, direction: "fire" }
-    UNKNOWN: { servo: null, direction: "pass" }
-
-# ---------------------------------------------------------------------------
-# DATABASE — SQLite
-# ---------------------------------------------------------------------------
-database:
-  path: "data/sorter.db"
-  wal_mode: true
-  cache_kb: 4096
-  write_queue:
-    flush_interval_s: 5
-    flush_batch_size: 20
-  retention:
-    events_days: 30
-    stats_days: 365
-
-# ---------------------------------------------------------------------------
-# DASHBOARD — SocketIO push interval
-# ---------------------------------------------------------------------------
-dashboard:
-  push_interval_s: 1.0
-  max_log_entries: 200
-
-# ---------------------------------------------------------------------------
-# ALERTS
-# ---------------------------------------------------------------------------
 alerts:
   low_confidence_streak: 5
   queue_overflow_warn: 15
   serial_reconnect_max: 5
+arduino:
+  heartbeat:
+    interval_s: 5
+    max_missed: 3
+  serial:
+    baudrate: 115200
+    port: /dev/ttyUSB0
+    reconnect_delay_s: 3.0
+    reconnect_max: 10
+    timeout_s: 1.0
+camera:
+  buffer_size: 2
+  device_index: 0
+  fps: 30
+  height: 480
+  width: 640
+conveyor:
+  camera_to_ir1_m: 0.25
+  camera_to_ir2_m: 0.45
+  image_flow_axis: x
+  image_flow_direction: left_to_right
+  speed_m_s: 0.3
+  timing:
+    ir1_window_ms:
+    - 2218
+    - 4153
+    ir2_window_ms:
+    - 5918
+    - 10443
+    tolerance_pct: 20
+dashboard:
+  max_log_entries: 200
+  push_interval_s: 1.0
+database:
+  cache_kb: 4096
+  path: data/sorter.db
+  retention:
+    events_days: 30
+    stats_days: 365
+  wal_mode: true
+  write_queue:
+    flush_batch_size: 20
+    flush_interval_s: 5
+hardware:
+  ir_sensors:
+    ir1:
+      debounce_ms: 20
+      label: station_green
+      pin: 2
+    ir2:
+      debounce_ms: 20
+      label: station_yellow
+      pin: 3
+  servos:
+    servo1:
+      angle_max: 270
+      angle_home: 220
+      angle_sweep: 0
+      label: flap_green
+      pin: 9
+      pulse_max_us: 2500
+      pulse_min_us: 500
+      return_duration_ms: 300
+      sweep_duration_ms: 200
+    servo2:
+      angle_max: 270
+      angle_home: 0
+      angle_sweep: 220
+      label: flap_yellow
+      pin: 10
+      pulse_max_us: 2500
+      pulse_min_us: 500
+      return_duration_ms: 300
+      sweep_duration_ms: 200
+model:
+  frame_skip: 3
+  input_size:
+  - 320
+  - 320
+  label_colors:
+    GREEN:
+    - 0
+    - 200
+    - 50
+    RED:
+    - 0
+    - 50
+    - 220
+    YELLOW:
+    - 0
+    - 210
+    - 255
+  labels:
+    0: GREEN
+    1: RED
+    2: YELLOW
+  num_threads: 4
+  path: models/best_ncnn_model
+  routing:
+    GREEN:
+      direction: fire
+      servo: 1
+    RED:
+      direction: pass
+      servo: null
+    UNKNOWN:
+      direction: pass
+      servo: null
+    YELLOW:
+      direction: fire
+      servo: 2
+  thresholds:
+    confidence: 0.5
+    iou_nms: 0.45
+    min_bbox_area: 1500
+  tracking:
+    center_distance_px: 76
+    iou_threshold: 0.35
+    ttl_ms: 600
+  type: ncnn
+  use_gpu: false
+system:
+  log_file: logs/sorter.log
+  log_level: INFO
+  mode: production
+  name: FruitSorter v3.0
+  queue_maxlen: 20
+  timezone: Asia/Ho_Chi_Minh
+web:
+  cors_allowed_origins: '*'
+  host: 0.0.0.0
+  port: 5000
+  secret_key: fruit-sorter-secret-2025
+  socketio_async_mode: threading

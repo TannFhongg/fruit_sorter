@@ -56,7 +56,7 @@ Chạy theo thứ tự này khi setup hoặc debug hệ thống:
 
 ## `test_serial.py`
 
-Tool này kiểm tra kết nối UART với Arduino Slave bằng cách gửi lần lượt `PING`, `STATUS`, `RESET`, sau đó gửi lại `PING` để xác nhận Arduino phản hồi sau reset.
+Tool này kiểm tra kết nối UART với Arduino Slave bằng cách gửi lần lượt `PING`, `STATUS`, `RESET`, sau đó gửi lại `PING` để xác nhận Arduino phản hồi sau reset. Lệnh `RESET` đọc `angle_home`, `angle_max`, `pulse_min_us` và `pulse_max_us` từ file config để đưa servo về đúng vị trí nghỉ.
 
 Chạy mặc định:
 
@@ -77,6 +77,7 @@ Tham số:
 | `--port` | `/dev/ttyUSB0` | Thiết bị serial của Arduino. Kiểm tra bằng `ls /dev/ttyUSB*` hoặc `ls /dev/ttyACM*`. |
 | `--baud` | `115200` | Baudrate UART. Cần khớp với firmware Arduino. |
 | `--timeout` | `2.0` | Số giây chờ phản hồi cho mỗi lệnh. |
+| `--config` | `config/hardware_config.yaml` | File config dùng để lấy góc home và thông số PWM cho lệnh `RESET`. |
 
 Yêu cầu:
 

@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from config.loader import load_config
 from shared.serial_protocol import cmd_ping, cmd_status, cmd_reset, parse_response
 
 
@@ -26,7 +27,22 @@ def main() -> None:
     parser.add_argument("--port",    default="/dev/ttyUSB0")
     parser.add_argument("--baud",    type=int, default=115200)
     parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--config",  default="config/hardware_config.yaml")
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    servos = cfg.get("hardware", {}).get("servos", {})
+    servo1 = servos.get("servo1", {})
+    servo2 = servos.get("servo2", {})
+    reset_cmd = cmd_reset(
+        {
+            1: servo1.get("angle_home", 0),
+            2: servo2.get("angle_home", 0),
+        },
+        angle_max=servo1.get("angle_max", 270),
+        pulse_min_us=servo1.get("pulse_min_us", 500),
+        pulse_max_us=servo1.get("pulse_max_us", 2500),
+    )
 
     try:
         import serial
@@ -55,7 +71,7 @@ def main() -> None:
 
     send_and_print("PING",   cmd_ping())
     send_and_print("STATUS", cmd_status())
-    send_and_print("RESET",  cmd_reset())
+    send_and_print("RESET",  reset_cmd)
     send_and_print("PING",   cmd_ping())   # verify after reset
 
     print("\n✓ Test hoàn tất")

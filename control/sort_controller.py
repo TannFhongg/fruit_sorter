@@ -4,17 +4,20 @@ control/sort_controller.py
 Thread 2 — nhận IR_TRIGGER từ Arduino Slave, khớp với DetectionResult
 trong queue theo cửa sổ thời gian, kích servo sweep tương ứng.
 
-v3.2 — Dynamic angle AND timing synchronization
-================================================
+v3.3 — Dynamic 270° servo angle/home/timing synchronization
+============================================================
 IMPORTANT CHANGES:
-  1. Sweep angle được đọc từ config YAML và gửi trong mỗi lệnh SORT
-  2. Sweep timing (sweep_duration_ms, return_duration_ms) cũng được
+  1. Home + sweep angle được đọc từ config YAML và gửi trong mỗi lệnh SORT
+  2. Servo range/PWM calibration cho servo 270° cũng được gửi xuống Arduino
+  3. Sweep timing (sweep_duration_ms, return_duration_ms) cũng được
      đọc từ config và gửi trong mỗi lệnh SORT
 
-Arduino không còn dùng #define hardcode cho cả góc và thời gian nữa.
+Arduino không còn dùng #define hardcode cho runtime góc và thời gian nữa.
 
 Điều này cho phép thay đổi:
+  - Góc nghỉ (angle_home): ví dụ servo1 nghỉ ở 220°
   - Góc quét (angle_sweep): ví dụ 120° → 180° để lực gạt mạnh hơn
+  - Dải servo vật lý (angle_max): ví dụ 270° servo
   - Thời gian quét (sweep_duration_ms): phải tăng tương ứng với góc
     để servo có đủ thời gian hoàn thành hành trình
   - Thời gian về (return_duration_ms): điều chỉnh tốc độ trở về
@@ -28,7 +31,7 @@ PHYSICAL CONSISTENCY:
   được một phần góc rồi bị ép quay về, gây mất đồng bộ vật lý.
 
 Lệnh gửi xuống Arduino:
-  {"cmd":"SORT","servo":1,"dir":"fire","angle":120,"sweep_ms":200,"return_ms":300}
+  {"cmd":"SORT","servo":1,"dir":"fire","angle":0,"home":220,"sweep_ms":200,"return_ms":300,"max":270,"min_us":500,"max_us":2500}
 
 v3.0 — SWEEP timing
 ====================
@@ -90,17 +93,36 @@ class SortController(threading.Thread):
             2: tuple(timing.get("ir2_window_ms", [1200, 1800])),
         }
 
-        # Read servo sweep angles from config (per-servo configuration)
+        # Read servo angles/calibration from config (per-servo configuration)
         srv_cfg = cfg.get("hardware", {}).get("servos", {})
         s1 = srv_cfg.get("servo1", {})
         s2 = srv_cfg.get("servo2", {})
+
+        self._servo_home_angles: dict[int, int] = {
+            1: s1.get("angle_home", 0),
+            2: s2.get("angle_home", 0),
+        }
         
         self._servo_angles: dict[int, int] = {
             1: s1.get("angle_sweep", 120),
             2: s2.get("angle_sweep", 120),
         }
 
-        # Read servo timing parameters from config
+        self._servo_angle_max: dict[int, int] = {
+            1: s1.get("angle_max", 270),
+            2: s2.get("angle_max", 270),
+        }
+
+        self._servo_pulse_min_us: dict[int, int] = {
+            1: s1.get("pulse_min_us", 500),
+            2: s2.get("pulse_min_us", 500),
+        }
+        self._servo_pulse_max_us: dict[int, int] = {
+            1: s1.get("pulse_max_us", 2500),
+            2: s2.get("pulse_max_us", 2500),
+        }
+
+        # Read servo timing parameters from config.
         self._servo_sweep_ms: dict[int, int] = {
             1: s1.get("sweep_duration_ms", 200),
             2: s2.get("sweep_duration_ms", 200),
@@ -117,8 +139,11 @@ class SortController(threading.Thread):
             s1.get("return_duration_ms", 300)
         )
         log.info(
-            "SortController init | windows=%s | angles=%s | timing=%s/%s | cycle=%d ms",
-            self._windows, self._servo_angles, self._servo_sweep_ms, 
+            "SortController init | windows=%s | home=%s | sweep=%s | max=%s "
+            "| pulse=%s/%s | timing=%s/%s | cycle=%d ms",
+            self._windows, self._servo_home_angles, self._servo_angles,
+            self._servo_angle_max, self._servo_pulse_min_us,
+            self._servo_pulse_max_us, self._servo_sweep_ms,
             self._servo_return_ms, self._sweep_cycle_ms,
         )
 
@@ -275,13 +300,27 @@ class SortController(threading.Thread):
             parts    = item.action.value.split("_")
             servo_id = int(parts[0].replace("SERVO", ""))
             
-            # Get sweep angle and timing from config for this servo
+            # Get angle, calibration, and timing from config for this servo.
+            home_angle = self._servo_home_angles.get(servo_id, 0)
             sweep_angle = self._servo_angles.get(servo_id, 120)
             sweep_ms    = self._servo_sweep_ms.get(servo_id, 200)
             return_ms   = self._servo_return_ms.get(servo_id, 300)
+            angle_max   = self._servo_angle_max.get(servo_id, 270)
+            pulse_min_us = self._servo_pulse_min_us.get(servo_id, 500)
+            pulse_max_us = self._servo_pulse_max_us.get(servo_id, 2500)
 
-            # Send SORT command with angle + timing — Arduino will execute the sweep asynchronously
-            ok = self._serial.send(cmd_sort(servo_id, "fire", sweep_angle, sweep_ms, return_ms))
+            # Send SORT command with full config; Arduino executes the sweep asynchronously.
+            ok = self._serial.send(cmd_sort(
+                servo_id,
+                "fire",
+                sweep_angle,
+                sweep_ms,
+                return_ms,
+                home_angle=home_angle,
+                angle_max=angle_max,
+                pulse_min_us=pulse_min_us,
+                pulse_max_us=pulse_max_us,
+            ))
             if not ok:
                 log.error(
                     "IR%d: %s → SERVO%d command failed; not emitting sort-done "
@@ -291,9 +330,12 @@ class SortController(threading.Thread):
                 return
 
             log.info(
-                "IR%d: %s → SERVO%d SWEEP [angle=%d°] [%dms/%dms] [conf=%.2f] [OK]",
+                "IR%d: %s → SERVO%d SWEEP [home=%d° sweep=%d° max=%d°] "
+                "[%d-%dus] [%dms/%dms] [conf=%.2f] [OK]",
                 sensor_id, item.fruit_color.value,
-                servo_id, sweep_angle, sweep_ms, return_ms, item.confidence,
+                servo_id, home_angle, sweep_angle, angle_max,
+                pulse_min_us, pulse_max_us, sweep_ms, return_ms,
+                item.confidence,
             )
 
         sort_event = self._build_sort_event(

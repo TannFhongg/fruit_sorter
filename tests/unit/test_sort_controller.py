@@ -3,11 +3,11 @@ tests/unit/test_sort_controller.py
 ===================================
 Kiểm tra SortController: FIFO order, timing gate, servo dispatch.
 
-v3.2 — Sweep mechanism with dynamic angle AND timing: servo nhận lệnh "fire"
-kèm angle, sweep_ms, return_ms từ config YAML, tự thực hiện sweep 0°→angle→0°
-trên Arduino với thời gian đúng.
+v3.3 — Sweep mechanism with dynamic home/sweep angle, 270° range, and timing:
+servo nhận lệnh "fire" kèm home, angle, max, PWM range, sweep_ms, return_ms
+từ config YAML.
 
-RPi gửi cmd_sort(servo_id, "fire", angle, sweep_ms, return_ms).
+RPi gửi cmd_sort(servo_id, "fire", angle, sweep_ms, return_ms, home_angle=...).
 
 Chạy: pytest tests/ -v
 """
@@ -64,10 +64,12 @@ def controller():
             "servos": {
                 "servo1": {
                     "angle_home": 0, "angle_sweep": 120,
+                    "angle_max": 270, "pulse_min_us": 500, "pulse_max_us": 2500,
                     "sweep_duration_ms": 200, "return_duration_ms": 300,
                 },
                 "servo2": {
                     "angle_home": 0, "angle_sweep": 120,
+                    "angle_max": 270, "pulse_min_us": 500, "pulse_max_us": 2500,
                     "sweep_duration_ms": 200, "return_duration_ms": 300,
                 },
             }
@@ -177,9 +179,10 @@ class TestSweepDispatch:
     def test_green_servo1_sweep_command(self, controller):
         """
         GREEN → SERVO1_FIRE, trigger qua IR1 (sensor=1).
-        Lệnh gửi Arduino: SORT servo=1 dir=fire angle=120 sweep_ms=200 return_ms=300
+        Lệnh gửi Arduino: SORT servo=1 dir=fire angle=120 home=0
+        sweep_ms=200 return_ms=300 max=270 min_us=500 max_us=2500
         (tất cả đọc từ config).
-        Arduino tự thực hiện sweep 0°→angle→0° với timing đúng.
+        Arduino tự thực hiện sweep home→angle→home với timing đúng.
         """
         sc, q, _, _, serial = controller
         q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
@@ -194,8 +197,61 @@ class TestSweepDispatch:
         assert cmd["servo"]     == 1
         assert cmd["dir"]       == "fire"
         assert cmd["angle"]     == 120  # angle từ config
+        assert cmd["home"]      == 0    # home từ config
         assert cmd["sweep_ms"]  == 200  # timing từ config
         assert cmd["return_ms"] == 300  # timing từ config
+        assert cmd["max"]       == 270
+        assert cmd["min_us"]    == 500
+        assert cmd["max_us"]    == 2500
+
+    def test_servo1_270_degree_home_220_from_config(self):
+        """Servo1 270° có thể nghỉ ở 220° và quét về 0°."""
+        cfg = {
+            "conveyor": {"timing": {
+                "ir1_window_ms": [700, 1000],
+                "ir2_window_ms": [1200, 1800],
+            }},
+            "hardware": {
+                "servos": {
+                    "servo1": {
+                        "angle_home": 220, "angle_sweep": 0,
+                        "angle_max": 270, "pulse_min_us": 500, "pulse_max_us": 2500,
+                        "sweep_duration_ms": 200, "return_duration_ms": 300,
+                    },
+                    "servo2": {
+                        "angle_home": 0, "angle_sweep": 220,
+                        "angle_max": 270, "pulse_min_us": 500, "pulse_max_us": 2500,
+                        "sweep_duration_ms": 200, "return_duration_ms": 300,
+                    },
+                }
+            },
+        }
+
+        serial_mock = MagicMock()
+        serial_mock.send.return_value = True
+        q = deque(maxlen=20)
+
+        from control.sort_controller import SortController
+        sc = SortController(
+            cfg=cfg,
+            serial_link=serial_mock,
+            detection_queue=q,
+            queue_lock=threading.Lock(),
+            db_write_queue=deque(maxlen=100),
+            stop_event=threading.Event(),
+        )
+
+        q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+
+        import json
+        cmd = json.loads(serial_mock.send.call_args[0][0].decode().strip())
+        assert cmd["servo"] == 1
+        assert cmd["angle"] == 0
+        assert cmd["home"] == 220
+        assert cmd["max"] == 270
+        assert cmd["min_us"] == 500
+        assert cmd["max_us"] == 2500
 
     def test_custom_angle_from_config(self):
         """
@@ -220,11 +276,13 @@ class TestSweepDispatch:
                 "servos": {
                     "servo1": {
                         "angle_home": 0, "angle_sweep": 180,  # góc custom 180°
+                        "angle_max": 270, "pulse_min_us": 500, "pulse_max_us": 2500,
                         "sweep_duration_ms": 350,              # thời gian tăng tương ứng
                         "return_duration_ms": 400,
                     },
                     "servo2": {
                         "angle_home": 0, "angle_sweep": 90,   # góc custom 90°
+                        "angle_max": 270, "pulse_min_us": 500, "pulse_max_us": 2500,
                         "sweep_duration_ms": 150,              # thời gian giảm tương ứng
                         "return_duration_ms": 250,
                     },
@@ -262,8 +320,12 @@ class TestSweepDispatch:
         call_bytes = serial_mock.send.call_args[0][0]
         cmd = json.loads(call_bytes.decode().strip())
         assert cmd["angle"]     == 180, "Servo1 phải gửi angle=180 từ config"
+        assert cmd["home"]      == 0,   "Servo1 phải gửi home=0 từ config"
         assert cmd["sweep_ms"]  == 350, "Servo1 phải gửi sweep_ms=350 từ config"
         assert cmd["return_ms"] == 400, "Servo1 phải gửi return_ms=400 từ config"
+        assert cmd["max"]       == 270
+        assert cmd["min_us"]    == 500
+        assert cmd["max_us"]    == 2500
 
         # Test servo2 với angle 90° + timing 150/250ms
         serial_mock.reset_mock()
@@ -273,13 +335,18 @@ class TestSweepDispatch:
         call_bytes = serial_mock.send.call_args[0][0]
         cmd = json.loads(call_bytes.decode().strip())
         assert cmd["angle"]     == 90,  "Servo2 phải gửi angle=90 từ config"
+        assert cmd["home"]      == 0,   "Servo2 phải gửi home=0 từ config"
         assert cmd["sweep_ms"]  == 150, "Servo2 phải gửi sweep_ms=150 từ config"
         assert cmd["return_ms"] == 250, "Servo2 phải gửi return_ms=250 từ config"
+        assert cmd["max"]       == 270
+        assert cmd["min_us"]    == 500
+        assert cmd["max_us"]    == 2500
 
     def test_yellow_servo2_sweep_command(self, controller):
         """
         YELLOW → SERVO2_FIRE, trigger qua IR2 (sensor=2).
-        Lệnh gửi Arduino: SORT servo=2 dir=fire angle=120 sweep_ms=200 return_ms=300
+        Lệnh gửi Arduino: SORT servo=2 dir=fire angle=120 home=0
+        sweep_ms=200 return_ms=300 max=270 min_us=500 max_us=2500
         (tất cả đọc từ config).
 
         Vật lý: IR2 nằm sau IR1 trên băng chuyền, phục vụ SERVO2.
@@ -298,8 +365,12 @@ class TestSweepDispatch:
         assert cmd["servo"]     == 2
         assert cmd["dir"]       == "fire"
         assert cmd["angle"]     == 120  # angle từ config
+        assert cmd["home"]      == 0    # home từ config
         assert cmd["sweep_ms"]  == 200  # timing từ config
         assert cmd["return_ms"] == 300  # timing từ config
+        assert cmd["max"]       == 270
+        assert cmd["min_us"]    == 500
+        assert cmd["max_us"]    == 2500
 
     def test_red_no_servo_sent(self, controller):
         """Quả đỏ → PASS → không gửi lệnh SORT."""
