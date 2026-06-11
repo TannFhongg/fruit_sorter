@@ -47,6 +47,7 @@ PYTHONPATH=. ./venv/bin/pytest tests/unit/test_sort_controller.py -q
 | File | Module chính | Nội dung kiểm tra | Lệnh chạy riêng |
 | --- | --- | --- | --- |
 | `test_timing_validator.py` | `control.timing_validator` | Kiểm tra cửa sổ thời gian IR1/IR2, biên hợp lệ, sensor không xác định và hàm `compute_window`. | `PYTHONPATH=. ./venv/bin/pytest tests/unit/test_timing_validator.py -q` |
+| `test_calibrate_belt.py` | `tools.calibrate_belt` | Kiểm tra tool calibration xả serial queue trước khi bắt đầu đo để tránh dùng IR trigger cũ. | `PYTHONPATH=. ./venv/bin/pytest tests/unit/test_calibrate_belt.py -q` |
 | `test_sort_controller.py` | `control.sort_controller` | Kiểm tra FIFO detection queue, timing gate, gửi lệnh servo sweep, mismatch sensor-servo, DB queue, event dashboard và purge detection quá hạn. | `PYTHONPATH=. ./venv/bin/pytest tests/unit/test_sort_controller.py -q` |
 | `test_db_writer.py` | `database.db_writer` | Kiểm tra ghi batch `SortEvent` vào SQLite và cập nhật `daily_stats` theo ngày của event, kể cả batch qua nửa đêm. | `PYTHONPATH=. ./venv/bin/pytest tests/unit/test_db_writer.py -q` |
 | `test_serial_link.py` | `drivers.serial_link` | Kiểm tra xử lý `PONG`, đưa `IR_TRIGGER` vào queue, heartbeat chỉ gửi ping và logic reconnect theo cấu hình. | `PYTHONPATH=. ./venv/bin/pytest tests/unit/test_serial_link.py -q` |

@@ -24,11 +24,50 @@ from config.loader import load_config
 from drivers.serial_link import SerialLink
 from shared.serial_protocol import is_ir_trigger
 
+PRE_START_SERIAL_QUIET_S = 0.10
+PRE_START_SERIAL_DRAIN_TIMEOUT_S = 0.50
+TRIGGER_TIMEOUT_S = 12.0
+
+
+def discard_pending_serial_messages(
+    serial: SerialLink,
+    *,
+    quiet_s: float = PRE_START_SERIAL_QUIET_S,
+    timeout_s: float = PRE_START_SERIAL_DRAIN_TIMEOUT_S,
+) -> int:
+    """
+    Discard app-level serial messages collected before a calibration run.
+
+    SerialLink remains the only raw UART reader. The short quiet window gives
+    that background thread time to move any already-arrived UART bytes into the
+    parsed message queue before the calibration clock starts.
+    """
+    drained = 0
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    quiet_deadline = time.monotonic() + max(0.0, quiet_s)
+
+    while time.monotonic() < deadline:
+        msg = serial.read_message()
+        if msg is not None:
+            drained += 1
+            quiet_deadline = time.monotonic() + max(0.0, quiet_s)
+            continue
+
+        if time.monotonic() >= quiet_deadline:
+            break
+        time.sleep(0.005)
+
+    return drained
+
 
 def measure_sensor(
     sensor_id: int,
     serial: SerialLink,
     runs: int,
+    *,
+    pre_start_quiet_s: float = PRE_START_SERIAL_QUIET_S,
+    pre_start_timeout_s: float = PRE_START_SERIAL_DRAIN_TIMEOUT_S,
+    trigger_timeout_s: float = TRIGGER_TIMEOUT_S,
 ) -> list[float]:
     """Tương tác người dùng: đặt vật thể → chờ IR → ghi delta_t."""
     results: list[float] = []
@@ -41,10 +80,18 @@ def measure_sensor(
     collected = 0
     while collected < runs:
         input(f"  [Lần {collected+1}/{runs}] Nhấn ENTER để bắt đầu...")
+        discarded = discard_pending_serial_messages(
+            serial,
+            quiet_s=pre_start_quiet_s,
+            timeout_s=pre_start_timeout_s,
+        )
+        if discarded:
+            print(f"  i  Bỏ qua {discarded} tín hiệu serial cũ trước khi đo")
+
         t_start = time.monotonic() * 1000
         print("  >>> GO — đặt vật thể lên băng chuyền ngay!")
 
-        deadline  = time.monotonic() + 12.0
+        deadline  = time.monotonic() + trigger_timeout_s
         triggered = False
         while time.monotonic() < deadline:
             msg = serial.read_message()
@@ -59,7 +106,7 @@ def measure_sensor(
                 break
 
         if not triggered:
-            print(f"  ✗  Timeout (12s) — thử lại lần này")
+            print(f"  ✗  Timeout ({trigger_timeout_s:.0f}s) — thử lại lần này")
         else:
             collected += 1
 

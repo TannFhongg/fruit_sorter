@@ -226,7 +226,7 @@ Cách chạy thực tế:
 
 1. Đảm bảo serial port trong `config/hardware_config.yaml` đúng với Arduino.
 2. Chạy tool và chờ thông báo kết nối Arduino `OK`.
-3. Với từng lần đo, nhấn `ENTER`, đặt vật thể ngay trước camera khi thấy `GO`.
+3. Với từng lần đo, nhấn `ENTER`, chờ tool xả tín hiệu serial cũ, rồi đặt vật thể ngay trước camera khi thấy `GO`.
 4. Chờ IR trigger tự động. Nếu quá 12 giây không thấy trigger, lần đo đó timeout và cần thử lại.
 5. Sau khi đủ số lần đo, đọc trung bình, độ lệch chuẩn và cửa sổ timing đề xuất.
 6. Khi tool hỏi `Ghi kết quả vào hardware_config.yaml? [y/N]:`, nhập `y` nếu muốn ghi vào config.
@@ -242,6 +242,7 @@ Lỗi thường gặp:
 - `Kết nối Arduino... THẤT BẠI`: kiểm tra serial port, baudrate, cáp USB và firmware Arduino.
 - Timeout 12 giây: vật thể chưa đi tới sensor, sensor không trigger, băng chuyền chưa chạy hoặc chọn sai `--sensors`.
 - Timing dao động lớn: đặt vật thể chưa nhất quán, tốc độ băng chuyền chưa ổn định hoặc cảm biến bị nhiễu.
+- Kết quả gần 0ms: kiểm tra xem tay hoặc vật thể có còn che cảm biến sau khi nhấn `ENTER` không. Tool đã xả queue trước khi in `GO`, nên trigger phát sinh trước đó sẽ bị bỏ qua.
 
 Lưu ý: tool này chỉ ghi `config/hardware_config.yaml` khi người dùng nhập chính xác `y`. Nếu chọn mặc định `N`, kết quả chỉ được in ra console.
 
