@@ -5,10 +5,10 @@ Giao thức UART JSON giữa RPi (Master) và Arduino (Slave).
 v3.3 — SWEEP mechanism with dynamic 270° home/angle/timing
 ===========================================================
 Master → Slave:
-  {"cmd":"SORT","servo":1,"dir":"fire","angle":120,"home":220,"sweep_ms":200,"return_ms":300,"max":270,"min_us":500,"max_us":2500}
-  {"cmd":"SORT","servo":1,"dir":"home","angle":0,"home":220,"sweep_ms":200,"return_ms":300,"max":270,"min_us":500,"max_us":2500}
+  {"cmd":"SORT","servo":1,"dir":"fire","angle":120,"home":0,"sweep_ms":200,"return_ms":300,"max":270,"min_us":500,"max_us":2500}
+  {"cmd":"SORT","servo":1,"dir":"home","angle":0,"home":0,"sweep_ms":200,"return_ms":300,"max":270,"min_us":500,"max_us":2500}
   {"cmd":"PING"}
-  {"cmd":"RESET","home1":220,"home2":0,"max":270,"min_us":500,"max_us":2500}
+  {"cmd":"RESET","home1":0,"home2":0,"max":270,"min_us":500,"max_us":2500}
   {"cmd":"STATUS"}
 
 Slave → Master:

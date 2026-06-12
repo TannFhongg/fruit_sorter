@@ -17,10 +17,10 @@
  * Protocol: JSON one-liner + '\n' @ 115200 baud
  *
  * Example commands:
- *   {"cmd":"SORT","servo":1,"dir":"fire","angle":0,"home":220,"max":270,"min_us":500,"max_us":2500,"sweep_ms":200,"return_ms":300}
- *   {"cmd":"SORT","servo":1,"dir":"home","angle":0,"home":220,"max":270,"min_us":500,"max_us":2500,"sweep_ms":200,"return_ms":300}
+ *   {"cmd":"SORT","servo":1,"dir":"fire","angle":0,"home":0,"max":270,"min_us":500,"max_us":2500,"sweep_ms":200,"return_ms":300}
+ *   {"cmd":"SORT","servo":1,"dir":"home","angle":0,"home":0,"max":270,"min_us":500,"max_us":2500,"sweep_ms":200,"return_ms":300}
  *   {"cmd":"PING"}
- *   {"cmd":"RESET","home1":220,"home2":0,"max":270,"min_us":500,"max_us":2500}
+ *   {"cmd":"RESET","home1":0,"home2":0,"max":270,"min_us":500,"max_us":2500}
  *   {"cmd":"STATUS"}
  *
  * =====================================================================
@@ -30,7 +30,7 @@
  * fruit to fall/slide off. Timing-sensitive, position-dependent.
  *
  * NEW design ("sweep" / flap):
- *   1. Flap rests at angle_home (read from JSON; servo1 may be 220°).
+ *   1. Flap rests at angle_home (read from JSON; servo1 defaults to 0°).
  *   2. On SORT command: servo sweeps angle_home → angle_sweep
  *      in SWEEP_DURATION_MS (~200 ms). The EDGE of the flap "slaps"
  *      the fruit sideways as it passes through the station.
@@ -95,7 +95,7 @@
 // ── Servo angles / PWM calibration ────────────────────────────────────────
 // Runtime values are updated from JSON commands sent by Raspberry Pi.
 // Defaults are used at boot before the first command arrives.
-#define SERVO1_DEFAULT_HOME_ANGLE  220
+#define SERVO1_DEFAULT_HOME_ANGLE  0
 #define SERVO2_DEFAULT_HOME_ANGLE  0
 #define DEFAULT_SERVO_MAX_ANGLE    270
 #define DEFAULT_PULSE_MIN_US       500

@@ -33,6 +33,7 @@ class ServoCommand:
     pulse_max_us:      int = 2500
     sweep_duration_ms: int = 200  # thời gian hoàn thành pha sweep (ms)
     return_duration_ms: int = 300 # thời gian trở về home (ms)
+    trigger_delay_ms:  int = 0    # delay từ IR trigger đến lúc servo quét
     direction:         str = ""   # "fire" | "home" — label debug
 
 
@@ -72,6 +73,7 @@ class ServoDriver:
         angle_max = srv.get("angle_max", 270)
         pulse_min_us = srv.get("pulse_min_us", 500)
         pulse_max_us = srv.get("pulse_max_us", 2500)
+        trigger_delay_ms = srv.get("trigger_delay_ms", 0)
 
         if direction == "fire":
             angle = srv["angle_sweep"]
@@ -88,6 +90,7 @@ class ServoDriver:
             pulse_max_us=pulse_max_us,
             sweep_duration_ms=sweep_ms,
             return_duration_ms=return_ms,
+            trigger_delay_ms=trigger_delay_ms,
             direction=direction,
         )
 
@@ -106,6 +109,7 @@ class ServoDriver:
                 pulse_max_us=srv.get("pulse_max_us", 2500),
                 sweep_duration_ms=srv.get("sweep_duration_ms", 200),
                 return_duration_ms=srv.get("return_duration_ms", 300),
+                trigger_delay_ms=srv.get("trigger_delay_ms", 0),
                 direction="home",
             ))
         return cmds

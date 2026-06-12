@@ -204,6 +204,41 @@ class TestSweepDispatch:
         assert cmd["min_us"]    == 500
         assert cmd["max_us"]    == 2500
 
+    def test_servo_dispatch_can_be_delayed_from_config(self, controller, monkeypatch):
+        """
+        Nếu IR nằm trước cánh gạt, controller phải chờ trigger_delay_ms
+        trước khi gửi lệnh servo.
+        """
+        sc, q, _, dbq, serial = controller
+        sc._servo_trigger_delay_ms[1] = 250
+
+        scheduled = {}
+
+        class FakeTimer:
+            def __init__(self, interval, function, args=()):
+                scheduled["interval"] = interval
+                scheduled["function"] = function
+                scheduled["args"] = args
+                self.daemon = False
+
+            def start(self):
+                scheduled["started"] = True
+
+        import control.sort_controller as sort_module
+        monkeypatch.setattr(sort_module.threading, "Timer", FakeTimer)
+
+        q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
+        sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+
+        serial.send.assert_not_called()
+        assert scheduled["started"] is True
+        assert scheduled["interval"] == pytest.approx(0.25)
+        assert len(dbq) == 0
+
+        scheduled["function"](*scheduled["args"])
+        serial.send.assert_called_once()
+        assert len(dbq) == 1
+
     def test_servo1_270_degree_home_220_from_config(self):
         """Servo1 270° có thể nghỉ ở 220° và quét về 0°."""
         cfg = {

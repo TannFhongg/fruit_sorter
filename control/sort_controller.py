@@ -2,7 +2,7 @@
 control/sort_controller.py
 ==========================
 Thread 2 — nhận IR_TRIGGER từ Arduino Slave, khớp với DetectionResult
-trong queue theo cửa sổ thời gian, kích servo sweep tương ứng.
+trong queue theo cửa sổ thời gian, rồi kích servo sweep tương ứng.
 
 v3.3 — Dynamic 270° servo angle/home/timing synchronization
 ============================================================
@@ -11,11 +11,12 @@ IMPORTANT CHANGES:
   2. Servo range/PWM calibration cho servo 270° cũng được gửi xuống Arduino
   3. Sweep timing (sweep_duration_ms, return_duration_ms) cũng được
      đọc từ config và gửi trong mỗi lệnh SORT
+  4. trigger_delay_ms bù thời gian từ IR sensor đến vị trí cánh gạt
 
 Arduino không còn dùng #define hardcode cho runtime góc và thời gian nữa.
 
 Điều này cho phép thay đổi:
-  - Góc nghỉ (angle_home): ví dụ servo1 nghỉ ở 220°
+  - Góc nghỉ (angle_home): ví dụ servo1 nghỉ ở 0°
   - Góc quét (angle_sweep): ví dụ 120° → 180° để lực gạt mạnh hơn
   - Dải servo vật lý (angle_max): ví dụ 270° servo
   - Thời gian quét (sweep_duration_ms): phải tăng tương ứng với góc
@@ -31,7 +32,7 @@ PHYSICAL CONSISTENCY:
   được một phần góc rồi bị ép quay về, gây mất đồng bộ vật lý.
 
 Lệnh gửi xuống Arduino:
-  {"cmd":"SORT","servo":1,"dir":"fire","angle":0,"home":220,"sweep_ms":200,"return_ms":300,"max":270,"min_us":500,"max_us":2500}
+  {"cmd":"SORT","servo":1,"dir":"fire","angle":0,"home":0,"sweep_ms":200,"return_ms":300,"max":270,"min_us":500,"max_us":2500}
 
 v3.0 — SWEEP timing
 ====================
@@ -45,6 +46,9 @@ chạy. Với belt 0.3 m/s và chu kỳ 500 ms → khoảng cách tối thiểu 
 Timing window (cửa sổ thời gian hợp lệ) tính từ lúc camera detect
 đến lúc IR trigger: không thay đổi về công thức, chỉ phụ thuộc vào
 khoảng cách camera→IR và tốc độ belt.
+
+Nếu IR sensor nằm trước cánh gạt, đặt trigger_delay_ms trong config
+để servo chờ quả đi từ IR đến đúng điểm gạt trước khi sweep.
 """
 
 from __future__ import annotations
@@ -132,6 +136,17 @@ class SortController(threading.Thread):
             2: s2.get("return_duration_ms", 300),
         }
 
+        # Delay between IR trigger and servo actuation. Use this when the IR
+        # beam is upstream of the physical flap, so the fruit needs extra time
+        # to reach the impact point.
+        self._servo_trigger_delay_ms: dict[int, int] = {
+            1: max(0, int(s1.get("trigger_delay_ms", 0))),
+            2: max(0, int(s2.get("trigger_delay_ms", 0))),
+        }
+
+        self._dispatch_timer_lock = threading.Lock()
+        self._pending_dispatch_timers: set[threading.Timer] = set()
+
         # Total sweep cycle time per servo (sweep + return).
         # Used for logging/diagnostics only — the Arduino manages its own timer.
         self._sweep_cycle_ms = (
@@ -140,11 +155,12 @@ class SortController(threading.Thread):
         )
         log.info(
             "SortController init | windows=%s | home=%s | sweep=%s | max=%s "
-            "| pulse=%s/%s | timing=%s/%s | cycle=%d ms",
+            "| pulse=%s/%s | timing=%s/%s | trigger_delay=%s | cycle=%d ms",
             self._windows, self._servo_home_angles, self._servo_angles,
             self._servo_angle_max, self._servo_pulse_min_us,
             self._servo_pulse_max_us, self._servo_sweep_ms,
-            self._servo_return_ms, self._sweep_cycle_ms,
+            self._servo_return_ms, self._servo_trigger_delay_ms,
+            self._sweep_cycle_ms,
         )
 
     # ── Main loop ──────────────────────────────────────────────────────────
@@ -271,7 +287,7 @@ class SortController(threading.Thread):
                 return
         # ── Lock released ─────────────────────────────────────────────────
 
-        self._dispatch(sensor_id, item)
+        self._schedule_dispatch(sensor_id, item)
 
     def _get_expected_servo(self, item: DetectionResult) -> int | None:
         """Extract expected servo ID from item action.
@@ -280,6 +296,47 @@ class SortController(threading.Thread):
             return None
         parts = item.action.value.split("_")
         return int(parts[0].replace("SERVO", ""))
+
+    def _dispatch_delay_ms_for(self, item: DetectionResult) -> int:
+        servo_id = self._get_expected_servo(item)
+        if servo_id is None:
+            return 0
+        return self._servo_trigger_delay_ms.get(servo_id, 0)
+
+    def _schedule_dispatch(self, sensor_id: int, item: DetectionResult) -> None:
+        delay_ms = self._dispatch_delay_ms_for(item)
+        if delay_ms <= 0:
+            self._dispatch(sensor_id, item)
+            return
+
+        servo_id = self._get_expected_servo(item)
+        log.info(
+            "IR%d: %s matched; delaying SERVO%d dispatch by %dms",
+            sensor_id, item.fruit_color.value, servo_id, delay_ms,
+        )
+        timer = threading.Timer(
+            delay_ms / 1000,
+            self._delayed_dispatch,
+            args=(sensor_id, item),
+        )
+        timer.daemon = True
+        with self._dispatch_timer_lock:
+            self._pending_dispatch_timers.add(timer)
+        timer.start()
+
+    def _delayed_dispatch(self, sensor_id: int, item: DetectionResult) -> None:
+        try:
+            if self._stop.is_set():
+                log.info(
+                    "Skipping delayed dispatch for %s because controller is stopping",
+                    item.fruit_color.value,
+                )
+                return
+            self._dispatch(sensor_id, item)
+        finally:
+            current = threading.current_thread()
+            with self._dispatch_timer_lock:
+                self._pending_dispatch_timers.discard(current)
 
     # ── Dispatch ───────────────────────────────────────────────────────────
     #
