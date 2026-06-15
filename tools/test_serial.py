@@ -59,20 +59,59 @@ def main() -> None:
 
     time.sleep(2)  # chờ Arduino reset
 
-    def send_and_print(label: str, data: bytes) -> None:
+    def read_line(timeout_s: float) -> dict | bytes | None:
+        old_timeout = ser.timeout
+        ser.timeout = timeout_s
+        try:
+            raw = ser.readline()
+        finally:
+            ser.timeout = old_timeout
+        if not raw:
+            return None
+        return parse_response(raw) or raw
+
+    def drain_pending(label: str, quiet_s: float = 0.2, timeout_s: float = 2.0) -> int:
+        drained = 0
+        deadline = time.monotonic() + timeout_s
+        quiet_deadline = time.monotonic() + quiet_s
+
+        while time.monotonic() < deadline:
+            msg = read_line(min(0.05, quiet_s))
+            if msg is not None:
+                drained += 1
+                quiet_deadline = time.monotonic() + quiet_s
+                print(f"[{label}] async/stale ← {msg}")
+                continue
+
+            if time.monotonic() >= quiet_deadline:
+                break
+
+        return drained
+
+    def send_and_print(label: str, data: bytes, expected_ack: str) -> None:
         print(f"\n[{label}] → {data.decode().strip()}")
         ser.write(data)
-        resp = ser.readline()
-        if resp:
-            msg = parse_response(resp)
-            print(f"[{label}] ← {msg}")
-        else:
-            print(f"[{label}] ← timeout")
 
-    send_and_print("PING",   cmd_ping())
-    send_and_print("STATUS", cmd_status())
-    send_and_print("RESET",  reset_cmd)
-    send_and_print("PING",   cmd_ping())   # verify after reset
+        deadline = time.monotonic() + args.timeout
+        while time.monotonic() < deadline:
+            msg = read_line(0.05)
+            if msg is None:
+                continue
+            if isinstance(msg, dict) and msg.get("ack") == expected_ack:
+                print(f"[{label}] ← {msg}")
+                return
+            print(f"[{label}] async/stale ← {msg}")
+
+        print(f"[{label}] ← timeout waiting for ack={expected_ack}")
+
+    drained = drain_pending("STARTUP")
+    if drained:
+        print(f"\nĐã xả {drained} dòng serial cũ trước khi test.")
+
+    send_and_print("PING",   cmd_ping(),   "PONG")
+    send_and_print("STATUS", cmd_status(), "STATUS")
+    send_and_print("RESET",  reset_cmd,    "RESET_DONE")
+    send_and_print("PING",   cmd_ping(),   "PONG")   # verify after reset
 
     print("\n✓ Test hoàn tất")
     ser.close()

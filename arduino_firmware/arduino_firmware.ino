@@ -109,6 +109,8 @@
 #define DEFAULT_RETURN_DURATION_MS  300
 
 #define DEBOUNCE_MS         20    // minimum ms between two valid IR triggers
+#define IR_CONFIRM_MS        5    // pin must remain LOW this long after edge
+#define IR_STARTUP_IGNORE_MS 1000 // ignore startup/reset electrical glitches
 #define SERIAL_BAUD      115200
 
 // ── Servo phase state ─────────────────────────────────────────────────────
@@ -126,6 +128,10 @@ volatile bool ir2_pending = false;
 // ── Debounce state ────────────────────────────────────────────────────────
 uint32_t last_ir1_ms = 0;
 uint32_t last_ir2_ms = 0;
+bool     ir1_confirm_pending = false;
+bool     ir2_confirm_pending = false;
+uint32_t ir1_confirm_start_ms = 0;
+uint32_t ir2_confirm_start_ms = 0;
 
 // ── Servo state ───────────────────────────────────────────────────────────
 Servo    servo1, servo2;
@@ -161,6 +167,45 @@ uint8_t  serial_buf_index = 0;
 // ── ISRs ──────────────────────────────────────────────────────────────────
 void isr_ir1() { ir1_pending = true; }
 void isr_ir2() { ir2_pending = true; }
+
+void send_ir_trigger(uint8_t sensor_id, uint32_t ts);
+
+void process_ir_sensor(
+  uint8_t sensor_id,
+  uint8_t pin,
+  volatile bool &edge_pending,
+  bool &confirm_pending,
+  uint32_t &confirm_start_ms,
+  uint32_t &last_trigger_ms
+) {
+  uint32_t now = millis();
+
+  if (edge_pending) {
+    noInterrupts();
+    edge_pending = false;
+    interrupts();
+
+    if ((now - boot_ms) >= IR_STARTUP_IGNORE_MS) {
+      confirm_pending = true;
+      confirm_start_ms = now;
+    }
+  }
+
+  if (!confirm_pending) {
+    return;
+  }
+
+  now = millis();
+  if ((now - confirm_start_ms) < IR_CONFIRM_MS) {
+    return;
+  }
+
+  confirm_pending = false;
+  if (digitalRead(pin) == LOW && (now - last_trigger_ms) >= DEBOUNCE_MS) {
+    last_trigger_ms = now;
+    send_ir_trigger(sensor_id, now);
+  }
+}
 
 // ── Servo angle helpers ───────────────────────────────────────────────────
 uint16_t angle_to_pulse_us(int angle, uint16_t max_angle,
@@ -342,27 +387,17 @@ void loop() {
   // ── 1. Service servo state machine ────────────────────────────────
   check_servo_state();
 
-  // ── 2. Process IR1 ────────────────────────────────────────────────
-  if (ir1_pending) {
-    ir1_pending = false;
-    uint32_t now = millis();
-    if (now - last_ir1_ms >= DEBOUNCE_MS) {
-      last_ir1_ms = now;
-      send_ir_trigger(1, now);
-    }
-  }
+  // ── 2. Process IR sensors ─────────────────────────────────────────
+  process_ir_sensor(
+    1, PIN_IR1, ir1_pending, ir1_confirm_pending,
+    ir1_confirm_start_ms, last_ir1_ms
+  );
+  process_ir_sensor(
+    2, PIN_IR2, ir2_pending, ir2_confirm_pending,
+    ir2_confirm_start_ms, last_ir2_ms
+  );
 
-  // ── 3. Process IR2 ────────────────────────────────────────────────
-  if (ir2_pending) {
-    ir2_pending = false;
-    uint32_t now = millis();
-    if (now - last_ir2_ms >= DEBOUNCE_MS) {
-      last_ir2_ms = now;
-      send_ir_trigger(2, now);
-    }
-  }
-
-  // ── 4. Process incoming Serial commands ───────────────────────────
+  // ── 3. Process incoming Serial commands ───────────────────────────
   while (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {

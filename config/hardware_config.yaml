@@ -26,11 +26,11 @@ conveyor:
   speed_m_s: 0.3
   timing:
     ir1_window_ms:
-    - 2218
-    - 4153
+    - 1386
+    - 3108
     ir2_window_ms:
-    - 5918
-    - 10443
+    - 4392
+    - 7551
     tolerance_pct: 20
 dashboard:
   max_log_entries: 200
@@ -57,24 +57,24 @@ hardware:
       pin: 3
   servos:
     servo1:
-      angle_max: 270
       angle_home: 220
-      angle_sweep: 0
+      angle_max: 270
+      angle_sweep: 120
       label: flap_green
       pin: 9
       pulse_max_us: 2500
       pulse_min_us: 500
-      return_duration_ms: 300
+      return_duration_ms: 200
       sweep_duration_ms: 200
     servo2:
-      angle_max: 270
       angle_home: 0
-      angle_sweep: 220
+      angle_max: 270
+      angle_sweep: 100
       label: flap_yellow
       pin: 10
       pulse_max_us: 2500
       pulse_min_us: 500
-      return_duration_ms: 300
+      return_duration_ms: 200
       sweep_duration_ms: 200
 model:
   frame_skip: 3
