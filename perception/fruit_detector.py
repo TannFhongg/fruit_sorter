@@ -788,7 +788,7 @@ def _resolve_action(route: dict) -> SortAction:
     direction = route.get("direction", "pass")
 
     if servo is None:
-        # RED và UNKNOWN: không kích servo
+        # PASS/UNKNOWN routes do not trigger a servo.
         if direction == "pass":
             return SortAction.PASS     # ← ĐỔI
         return SortAction.REJECT

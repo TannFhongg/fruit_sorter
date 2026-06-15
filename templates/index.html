@@ -26,7 +26,7 @@
   <!-- ── Sidebar ────────────────────────────────────────────────── -->
   <nav class="sidebar">
     <div class="sidebar__section">Menu</div>
-    <div class="sidebar__item active">
+    <div class="sidebar__item active" data-jump="dashboard">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
         <rect x="1" y="1" width="5" height="5" rx="1" fill="currentColor" opacity=".8"/>
         <rect x="8" y="1" width="5" height="5" rx="1" fill="currentColor" opacity=".5"/>
@@ -35,13 +35,13 @@
       </svg>
       Dashboard
     </div>
-    <div class="sidebar__item">
+    <div class="sidebar__item" data-jump="analytics">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
         <path d="M1 11L4 7l3 3 3-5 3 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
       Analytics
     </div>
-    <div class="sidebar__item">
+    <div class="sidebar__item" data-jump="history">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
         <circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.2"/>
         <path d="M7 4v3.5l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
@@ -75,7 +75,7 @@
   </nav>
 
   <!-- ── Main ───────────────────────────────────────────────────── -->
-  <main class="main">
+  <main class="main" id="dashboard">
 
     <!-- Stat cards -->
     <section>
@@ -218,6 +218,85 @@
           <span style="width:60px">Station</span>
         </div>
         <div class="log-body" id="event-log"></div>
+      </div>
+    </section>
+
+    <!-- Database analytics -->
+    <section id="analytics">
+      <div class="sec-header">
+        <h2>Analytics</h2>
+        <div class="sec-header__line"></div>
+        <span class="sec-header__tag" id="analytics-updated">Loading database...</span>
+      </div>
+
+      <div class="analytics-grid">
+        <div class="analytics-card">
+          <div class="analytics-card__title">Today from database</div>
+          <div class="analytics-kpis">
+            <div class="analytics-kpi green">
+              <span>Green</span>
+              <strong id="db-green">0</strong>
+            </div>
+            <div class="analytics-kpi red">
+              <span>Red</span>
+              <strong id="db-red">0</strong>
+            </div>
+            <div class="analytics-kpi yellow">
+              <span>Yellow</span>
+              <strong id="db-yellow">0</strong>
+            </div>
+            <div class="analytics-kpi">
+              <span>Rejects</span>
+              <strong id="db-rejects">0</strong>
+            </div>
+            <div class="analytics-kpi total">
+              <span>Total</span>
+              <strong id="db-total">0</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="analytics-card" id="history">
+          <div class="analytics-card__title">Daily history</div>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th class="num">Green</th>
+                  <th class="num">Red</th>
+                  <th class="num">Yellow</th>
+                  <th class="num">Rejects</th>
+                  <th class="num">Total</th>
+                </tr>
+              </thead>
+              <tbody id="history-table">
+                <tr><td colspan="6" class="empty-cell">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="analytics-card analytics-card--wide">
+          <div class="analytics-card__title">Recent database events</div>
+          <div class="data-table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="num">ID</th>
+                  <th>Time</th>
+                  <th>Color</th>
+                  <th>Action</th>
+                  <th class="num">Station</th>
+                  <th class="num">Confidence</th>
+                </tr>
+              </thead>
+              <tbody id="recent-table">
+                <tr><td colspan="6" class="empty-cell">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
 

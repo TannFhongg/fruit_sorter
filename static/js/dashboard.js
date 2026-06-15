@@ -28,7 +28,10 @@ socket.on('disconnect', () => {
 });
 
 socket.on('stats_update', data => applyStats(data));
-socket.on('sort_event',   e    => addLogEntry(e));
+socket.on('sort_event',   e    => {
+  addLogEntry(e);
+  scheduleAnalyticsRefresh();
+});
 
 // ── Detection event từ server (push ngay khi detect) ──────────────────────
 socket.on('detection', data => {
@@ -61,6 +64,8 @@ async function loadBootstrapData() {
       is_reject: e.is_reject, ts_ms: e.sorted_at,
     }));
   } catch {}
+
+  loadAnalyticsData();
 }
 
 // ── Stats update ──────────────────────────────────────────────────────────
@@ -229,6 +234,132 @@ function showDetectionOverlay(label, confidence) {
     badge.textContent     = 'No detection';
     badge.className       = 'cam-badge cam-badge--detect';
   }, 2000);
+}
+
+// ── Analytics from SQLite-backed API ──────────────────────────────────────
+let _analyticsRefreshTimer = null;
+
+document.querySelectorAll('.sidebar__item[data-jump]').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('.sidebar__item').forEach(el => el.classList.remove('active'));
+    item.classList.add('active');
+
+    const target = $(item.dataset.jump);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+
+setInterval(loadAnalyticsData, 10000);
+
+function scheduleAnalyticsRefresh() {
+  clearTimeout(_analyticsRefreshTimer);
+  _analyticsRefreshTimer = setTimeout(loadAnalyticsData, 6000);
+}
+
+async function loadAnalyticsData() {
+  try {
+    const [todayRes, historyRes, recentRes] = await Promise.all([
+      fetch('/api/stats/today'),
+      fetch('/api/stats/history?days=14'),
+      fetch('/api/events/recent?limit=25'),
+    ]);
+
+    if (!todayRes.ok || !historyRes.ok || !recentRes.ok) {
+      throw new Error('Database API unavailable');
+    }
+
+    applyTodayAnalytics(await todayRes.json());
+    renderHistoryTable(await historyRes.json());
+    renderRecentTable(await recentRes.json());
+    $('analytics-updated').textContent = 'Database updated ' +
+      new Date().toLocaleTimeString('vi-VN', { hour12: false });
+  } catch {
+    $('analytics-updated').textContent = 'Database unavailable';
+    renderTableMessage('history-table', 6, 'Cannot load daily history');
+    renderTableMessage('recent-table', 6, 'Cannot load recent events');
+  }
+}
+
+function applyTodayAnalytics(d) {
+  $('db-green').textContent   = d.green || 0;
+  $('db-red').textContent     = d.red || 0;
+  $('db-yellow').textContent  = d.yellow || 0;
+  $('db-rejects').textContent = d.rejects || 0;
+  $('db-total').textContent   = d.total || 0;
+}
+
+function renderHistoryTable(rows) {
+  const body = $('history-table');
+  body.innerHTML = '';
+  if (!rows.length) {
+    renderTableMessage('history-table', 6, 'No daily stats yet');
+    return;
+  }
+
+  rows.slice().reverse().forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(row.date || '')}</td>
+      <td class="num green-text">${row.green || 0}</td>
+      <td class="num red-text">${row.red || 0}</td>
+      <td class="num yellow-text">${row.yellow || 0}</td>
+      <td class="num">${row.rejects || 0}</td>
+      <td class="num strong">${row.total || 0}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function renderRecentTable(rows) {
+  const body = $('recent-table');
+  body.innerHTML = '';
+  if (!rows.length) {
+    renderTableMessage('recent-table', 6, 'No sort events yet');
+    return;
+  }
+
+  rows.forEach(row => {
+    const ts = row.sorted_at
+      ? new Date(row.sorted_at).toLocaleString('vi-VN', { hour12: false })
+      : '—';
+    const color = row.fruit_color || 'UNKNOWN';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="num">${row.id}</td>
+      <td>${ts}</td>
+      <td class="${colorClass(color)}">${escapeHtml(color)}</td>
+      <td>${escapeHtml(row.action || '')}</td>
+      <td class="num">IR${row.station || 1}</td>
+      <td class="num">${formatConfidence(row.confidence)}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function renderTableMessage(tableId, colspan, message) {
+  $(tableId).innerHTML = `<tr><td colspan="${colspan}" class="empty-cell">${message}</td></tr>`;
+}
+
+function formatConfidence(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? `${Math.round(n * 100)}%` : '—';
+}
+
+function colorClass(color) {
+  if (color === 'GREEN') return 'green-text';
+  if (color === 'RED') return 'red-text';
+  if (color === 'YELLOW') return 'yellow-text';
+  return '';
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char]));
 }
 
 // ── Event log ─────────────────────────────────────────────────────────────

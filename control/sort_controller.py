@@ -21,6 +21,8 @@ Arduino không còn dùng #define hardcode cho runtime góc và thời gian nữ
   - Thời gian quét (sweep_duration_ms): phải tăng tương ứng với góc
     để servo có đủ thời gian hoàn thành hành trình
   - Thời gian về (return_duration_ms): điều chỉnh tốc độ trở về
+  - Delay sau IR trigger (trigger_delay_ms): chờ quả đi từ mắt IR đến
+    đúng vị trí cánh gạt rồi mới gửi lệnh SORT xuống Arduino
 
 ...tất cả trong file config/hardware_config.yaml mà không cần biên dịch 
 lại Arduino firmware.
@@ -131,6 +133,10 @@ class SortController(threading.Thread):
             1: s1.get("return_duration_ms", 300),
             2: s2.get("return_duration_ms", 300),
         }
+        self._servo_trigger_delay_ms: dict[int, int] = {
+            1: max(0, int(s1.get("trigger_delay_ms", 0))),
+            2: max(0, int(s2.get("trigger_delay_ms", 0))),
+        }
 
         # Total sweep cycle time per servo (sweep + return).
         # Used for logging/diagnostics only — the Arduino manages its own timer.
@@ -140,11 +146,12 @@ class SortController(threading.Thread):
         )
         log.info(
             "SortController init | windows=%s | home=%s | sweep=%s | max=%s "
-            "| pulse=%s/%s | timing=%s/%s | cycle=%d ms",
+            "| pulse=%s/%s | timing=%s/%s | trigger_delay=%s | cycle=%d ms",
             self._windows, self._servo_home_angles, self._servo_angles,
             self._servo_angle_max, self._servo_pulse_min_us,
             self._servo_pulse_max_us, self._servo_sweep_ms,
-            self._servo_return_ms, self._sweep_cycle_ms,
+            self._servo_return_ms, self._servo_trigger_delay_ms,
+            self._sweep_cycle_ms,
         )
 
     # ── Main loop ──────────────────────────────────────────────────────────
@@ -296,52 +303,113 @@ class SortController(threading.Thread):
                 "IR%d: %s → %s (no sweep)",
                 sensor_id, item.fruit_color.value, status,
             )
-        else:
-            parts    = item.action.value.split("_")
-            servo_id = int(parts[0].replace("SERVO", ""))
-            
-            # Get angle, calibration, and timing from config for this servo.
-            home_angle = self._servo_home_angles.get(servo_id, 0)
-            sweep_angle = self._servo_angles.get(servo_id, 120)
-            sweep_ms    = self._servo_sweep_ms.get(servo_id, 200)
-            return_ms   = self._servo_return_ms.get(servo_id, 300)
-            angle_max   = self._servo_angle_max.get(servo_id, 270)
-            pulse_min_us = self._servo_pulse_min_us.get(servo_id, 500)
-            pulse_max_us = self._servo_pulse_max_us.get(servo_id, 2500)
+            self._emit_sort_done(item, sensor_id, is_reject)
+            return
 
-            # Send SORT command with full config; Arduino executes the sweep asynchronously.
-            ok = self._serial.send(cmd_sort(
-                servo_id,
-                "fire",
-                sweep_angle,
-                sweep_ms,
-                return_ms,
-                home_angle=home_angle,
-                angle_max=angle_max,
-                pulse_min_us=pulse_min_us,
-                pulse_max_us=pulse_max_us,
-            ))
-            if not ok:
-                log.error(
-                    "IR%d: %s → SERVO%d command failed; not emitting sort-done "
-                    "or writing DB event",
-                    sensor_id, item.fruit_color.value, servo_id,
-                )
-                return
+        parts    = item.action.value.split("_")
+        servo_id = int(parts[0].replace("SERVO", ""))
 
+        # Get angle, calibration, and timing from config for this servo.
+        home_angle = self._servo_home_angles.get(servo_id, 0)
+        sweep_angle = self._servo_angles.get(servo_id, 120)
+        sweep_ms    = self._servo_sweep_ms.get(servo_id, 200)
+        return_ms   = self._servo_return_ms.get(servo_id, 300)
+        trigger_delay_ms = self._servo_trigger_delay_ms.get(servo_id, 0)
+        angle_max   = self._servo_angle_max.get(servo_id, 270)
+        pulse_min_us = self._servo_pulse_min_us.get(servo_id, 500)
+        pulse_max_us = self._servo_pulse_max_us.get(servo_id, 2500)
+
+        args = (
+            sensor_id,
+            item,
+            servo_id,
+            home_angle,
+            sweep_angle,
+            sweep_ms,
+            return_ms,
+            trigger_delay_ms,
+            angle_max,
+            pulse_min_us,
+            pulse_max_us,
+        )
+        if trigger_delay_ms > 0:
             log.info(
-                "IR%d: %s → SERVO%d SWEEP [home=%d° sweep=%d° max=%d°] "
-                "[%d-%dus] [%dms/%dms] [conf=%.2f] [OK]",
-                sensor_id, item.fruit_color.value,
-                servo_id, home_angle, sweep_angle, angle_max,
-                pulse_min_us, pulse_max_us, sweep_ms, return_ms,
-                item.confidence,
+                "IR%d: %s → SERVO%d scheduled after %dms [conf=%.2f]",
+                sensor_id, item.fruit_color.value, servo_id,
+                trigger_delay_ms, item.confidence,
             )
+            timer = threading.Timer(
+                trigger_delay_ms / 1000.0,
+                self._send_servo_sweep,
+                args=args,
+            )
+            timer.daemon = True
+            timer.start()
+            return
 
+        self._send_servo_sweep(*args)
+
+    def _send_servo_sweep(
+        self,
+        sensor_id: int,
+        item: DetectionResult,
+        servo_id: int,
+        home_angle: int,
+        sweep_angle: int,
+        sweep_ms: int,
+        return_ms: int,
+        trigger_delay_ms: int,
+        angle_max: int,
+        pulse_min_us: int,
+        pulse_max_us: int,
+    ) -> None:
+        if self._stop.is_set():
+            log.debug(
+                "IR%d: %s → SERVO%d skipped because controller is stopping",
+                sensor_id, item.fruit_color.value, servo_id,
+            )
+            return
+
+        # Send SORT command with full config; Arduino executes the sweep asynchronously.
+        ok = self._serial.send(cmd_sort(
+            servo_id,
+            "fire",
+            sweep_angle,
+            sweep_ms,
+            return_ms,
+            home_angle=home_angle,
+            angle_max=angle_max,
+            pulse_min_us=pulse_min_us,
+            pulse_max_us=pulse_max_us,
+        ))
+        if not ok:
+            log.error(
+                "IR%d: %s → SERVO%d command failed; not emitting sort-done "
+                "or writing DB event",
+                sensor_id, item.fruit_color.value, servo_id,
+            )
+            return
+
+        log.info(
+            "IR%d: %s → SERVO%d SWEEP [delay=%dms home=%d° sweep=%d° max=%d°] "
+            "[%d-%dus] [%dms/%dms] [conf=%.2f] [OK]",
+            sensor_id, item.fruit_color.value,
+            servo_id, trigger_delay_ms, home_angle, sweep_angle, angle_max,
+            pulse_min_us, pulse_max_us, sweep_ms, return_ms,
+            item.confidence,
+        )
+        self._emit_sort_done(item, sensor_id, False)
+
+    def _emit_sort_done(
+        self,
+        item: DetectionResult,
+        sensor_id: int,
+        is_reject: bool,
+    ) -> None:
         sort_event = self._build_sort_event(
             item,
             sensor_id,
-            (item.action == SortAction.REJECT),
+            is_reject,
         )
         bus.emit(
             EVT_SORT_DONE,

@@ -33,8 +33,8 @@ def _cfg(mode: str = "production") -> dict:
             },
             "labels": {0: "GREEN", 1: "RED", 2: "YELLOW"},
             "routing": {
-                "GREEN": {"servo": 1, "direction": "fire"},
-                "RED": {"servo": None, "direction": "pass"},
+                "GREEN": {"servo": None, "direction": "pass"},
+                "RED": {"servo": 1, "direction": "fire"},
                 "YELLOW": {"servo": 2, "direction": "fire"},
                 "UNKNOWN": {"servo": None, "direction": "pass"},
             },
@@ -110,46 +110,46 @@ def test_label_must_be_stable_before_detection_is_enqueued():
         return True
 
     detector._frame_id = 1
-    red_first_frame = {
-        "label": "RED",
+    green_first_frame = {
+        "label": "GREEN",
         "confidence": 0.80,
         "bbox": (100, 120, 80, 80),
     }
-    assert claim_and_enqueue(red_first_frame, capture_ts_ms=1000.0) is False
+    assert claim_and_enqueue(green_first_frame, capture_ts_ms=1000.0) is False
     assert list(detector.queue) == []
 
     detector._frame_id = 2
-    green_first_frame = {
-        "label": "GREEN",
+    red_first_frame = {
+        "label": "RED",
         "confidence": 0.92,
         "bbox": (106, 122, 80, 80),
     }
-    assert claim_and_enqueue(green_first_frame, capture_ts_ms=1100.0) is False
+    assert claim_and_enqueue(red_first_frame, capture_ts_ms=1100.0) is False
     assert list(detector.queue) == []
 
     detector._frame_id = 3
-    green_second_frame = {
-        "label": "GREEN",
+    red_second_frame = {
+        "label": "RED",
         "confidence": 0.93,
         "bbox": (112, 124, 80, 80),
     }
-    assert claim_and_enqueue(green_second_frame, capture_ts_ms=1200.0) is True
+    assert claim_and_enqueue(red_second_frame, capture_ts_ms=1200.0) is True
     assert len(detector.queue) == 1
     result = detector.queue[0]
-    assert result.fruit_color == FruitColor.GREEN
+    assert result.fruit_color == FruitColor.RED
     assert result.action == SortAction.SERVO1_FIRE
     assert result.confidence == 0.93
     assert result.timestamp_ms == 1200.0
-    assert all(item.fruit_color != FruitColor.RED for item in detector.queue)
+    assert all(item.fruit_color != FruitColor.GREEN for item in detector.queue)
     assert all(item.action != SortAction.PASS for item in detector.queue)
 
     detector._frame_id = 4
-    green_after_enqueue = {
-        "label": "GREEN",
+    red_after_enqueue = {
+        "label": "RED",
         "confidence": 0.94,
         "bbox": (118, 126, 80, 80),
     }
-    assert claim_and_enqueue(green_after_enqueue, capture_ts_ms=1300.0) is False
+    assert claim_and_enqueue(red_after_enqueue, capture_ts_ms=1300.0) is False
     assert len(detector.queue) == 1
 
 

@@ -49,7 +49,7 @@ hardware:
   ir_sensors:
     ir1:
       debounce_ms: 20
-      label: station_green
+      label: station_red
       pin: 2
     ir2:
       debounce_ms: 20
@@ -59,13 +59,14 @@ hardware:
     servo1:
       angle_home: 220
       angle_max: 270
-      angle_sweep: 120
-      label: flap_green
+      angle_sweep: 100
+      label: flap_red
       pin: 9
       pulse_max_us: 2500
       pulse_min_us: 500
-      return_duration_ms: 200
-      sweep_duration_ms: 200
+      return_duration_ms: 400
+      sweep_duration_ms: 550
+      trigger_delay_ms: 3000
     servo2:
       angle_home: 0
       angle_max: 270
@@ -74,8 +75,9 @@ hardware:
       pin: 10
       pulse_max_us: 2500
       pulse_min_us: 500
-      return_duration_ms: 200
-      sweep_duration_ms: 200
+      return_duration_ms: 400
+      sweep_duration_ms: 550
+      trigger_delay_ms: 3000
 model:
   frame_skip: 3
   input_size:
@@ -102,11 +104,11 @@ model:
   path: models/best_ncnn_model
   routing:
     GREEN:
-      direction: fire
-      servo: 1
-    RED:
       direction: pass
       servo: null
+    RED:
+      direction: fire
+      servo: 1
     UNKNOWN:
       direction: pass
       servo: null

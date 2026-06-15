@@ -372,6 +372,80 @@ class TestSweepDispatch:
         assert cmd["min_us"]    == 500
         assert cmd["max_us"]    == 2500
 
+    def test_trigger_delay_ms_schedules_servo_command(self):
+        """
+        trigger_delay_ms trì hoãn lệnh SORT sau khi IR đã match quả.
+        SortController không được sleep/block; nó lên lịch Timer rồi return.
+        """
+        cfg = {
+            "conveyor": {"timing": {
+                "ir1_window_ms": [700, 1000],
+                "ir2_window_ms": [1200, 1800],
+            }},
+            "hardware": {
+                "servos": {
+                    "servo1": {
+                        "angle_home": 220, "angle_sweep": 120,
+                        "angle_max": 270, "pulse_min_us": 500, "pulse_max_us": 2500,
+                        "sweep_duration_ms": 450, "return_duration_ms": 400,
+                        "trigger_delay_ms": 600,
+                    },
+                    "servo2": {
+                        "angle_home": 0, "angle_sweep": 150,
+                        "angle_max": 270, "pulse_min_us": 500, "pulse_max_us": 2500,
+                        "sweep_duration_ms": 450, "return_duration_ms": 400,
+                        "trigger_delay_ms": 600,
+                    },
+                }
+            },
+        }
+
+        serial_mock = MagicMock()
+        serial_mock.send.return_value = True
+        q = deque(maxlen=20)
+        dbq = deque(maxlen=100)
+
+        from control.sort_controller import SortController
+        sc = SortController(
+            cfg=cfg,
+            serial_link=serial_mock,
+            detection_queue=q,
+            queue_lock=threading.Lock(),
+            db_write_queue=dbq,
+            stop_event=threading.Event(),
+        )
+
+        q.append(_make_det("GREEN", 850, SortAction.SERVO1_FIRE))
+
+        from unittest.mock import patch
+        with patch("control.sort_controller.threading.Timer") as timer_cls:
+            timer = MagicMock()
+            timer_cls.return_value = timer
+
+            sc._handle_ir_trigger({"ack": "IR_TRIGGER", "sensor": 1})
+
+            serial_mock.send.assert_not_called()
+            assert len(dbq) == 0
+            timer_cls.assert_called_once()
+            timer.start.assert_called_once()
+
+            delay_s, callback = timer_cls.call_args.args
+            callback_args = timer_cls.call_args.kwargs["args"]
+            assert delay_s == pytest.approx(0.6)
+
+        callback(*callback_args)
+
+        import json
+        serial_mock.send.assert_called_once()
+        cmd = json.loads(serial_mock.send.call_args[0][0].decode().strip())
+        assert cmd["cmd"] == "SORT"
+        assert cmd["servo"] == 1
+        assert cmd["angle"] == 120
+        assert cmd["home"] == 220
+        assert cmd["sweep_ms"] == 450
+        assert cmd["return_ms"] == 400
+        assert len(dbq) == 1
+
     def test_red_no_servo_sent(self, controller):
         """Quả đỏ → PASS → không gửi lệnh SORT."""
         sc, q, _, dbq, serial = controller
